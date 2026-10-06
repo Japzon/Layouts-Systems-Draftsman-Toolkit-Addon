@@ -1351,10 +1351,14 @@ def _bake_and_release_hook(hook_empty: bpy.types.Object) -> None:
                     'uniform':      mod.use_falloff_uniform,
                 }))
     # 2. Bake each linked mesh's Hook modifier (apply → rebind at new rest state)
-    prev_active = bpy.context.view_layer.objects.active
+    orig_mode = bpy.context.mode if bpy.context else 'OBJECT'
+    prev_active = bpy.context.view_layer.objects.active if bpy.context else None
     for mesh_obj, mod_name, mod_data in meshes_to_bake:
         try:
             bpy.context.view_layer.objects.active = mesh_obj
+            if bpy.context.mode != 'OBJECT':
+                try: bpy.ops.object.mode_set(mode='OBJECT')
+                except: pass
             bpy.ops.object.modifier_apply(modifier=mod_name)
             # Re-create the hook modifier at the new rest pose
             new_mod = mesh_obj.modifiers.new(name=mod_name, type='HOOK')
@@ -1370,12 +1374,21 @@ def _bake_and_release_hook(hook_empty: bpy.types.Object) -> None:
                 bpy.ops.object.mode_set(mode='EDIT')
                 bpy.ops.mesh.select_all(action='SELECT')
                 bpy.ops.object.hook_reset(modifier=new_mod.name)
-                bpy.ops.object.mode_set(mode='OBJECT')
-            except: pass
+            finally:
+                if bpy.context.mode != 'OBJECT':
+                    try: bpy.ops.object.mode_set(mode='OBJECT')
+                    except: pass
         except Exception as e:
             print(f"[LSD] Flip bake failed on {mesh_obj.name}: {e}")
-    if prev_active:
-        bpy.context.view_layer.objects.active = prev_active
+            if bpy.context and bpy.context.mode != 'OBJECT':
+                try: bpy.ops.object.mode_set(mode='OBJECT')
+                except: pass
+    if prev_active and prev_active.name in bpy.data.objects:
+        try: bpy.context.view_layer.objects.active = prev_active
+        except: pass
+    if bpy.context and bpy.context.mode != 'OBJECT':
+        try: bpy.ops.object.mode_set(mode='OBJECT')
+        except: pass
     # 3. Apply visual transform on the Empty itself (bake constraint result → location)
     try:
         world_mat = hook_empty.matrix_world.copy()
@@ -1474,6 +1487,9 @@ def sync_dimension_flipping(obj):
         print(f"[LSD] Flip Role Swap Error: {e}")
     finally:
         _dim_sync_active_ids.remove(root.name)
+        if bpy.context and bpy.context.mode != 'OBJECT':
+            try: bpy.ops.object.mode_set(mode='OBJECT')
+            except: pass
 @staticmethod
 
 def apply_path_vertex_alignment(context):
@@ -5223,6 +5239,23 @@ CLASSES = [
     LSD_OT_Core_DisablePanel, LSD_OT_Core_SnapCursorToActive
 ]
 
+_lsd_onion_prev_obj_count = -1
+
+@bpy.app.handlers.persistent
+def lsd_onion_skin_object_duplicate_handler(scene, depsgraph):
+    """
+    Automatically disables Timeline Onion Skinning when objects are copied or duplicated.
+    """
+    global _lsd_onion_prev_obj_count
+    if not scene:
+        return
+    curr_count = len(scene.objects)
+    if _lsd_onion_prev_obj_count != -1 and curr_count > _lsd_onion_prev_obj_count:
+        settings = getattr(scene, 'lsd_anim_settings', None)
+        if settings and getattr(settings, 'onion_skin_enabled', False):
+            settings.onion_skin_enabled = False
+    _lsd_onion_prev_obj_count = curr_count
+
 _lsd_previous_mode = 'OBJECT'
 
 @bpy.app.handlers.persistent
@@ -5317,6 +5350,7 @@ def register():
     if lsd_dimension_hook_cleanup_handler not in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.append(lsd_dimension_hook_cleanup_handler)
     if lsd_standalone_offset_sync not in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.append(lsd_standalone_offset_sync)
     if lsd_onion_arrow_selection_handler not in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.append(lsd_onion_arrow_selection_handler)
+    if lsd_onion_skin_object_duplicate_handler not in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.append(lsd_onion_skin_object_duplicate_handler)
     
     # Lambda with context safety
     def safe_dimension_update(dummy):
@@ -5351,6 +5385,7 @@ def unregister():
     if lsd_dimension_hook_cleanup_handler in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.remove(lsd_dimension_hook_cleanup_handler)
     if lsd_standalone_offset_sync in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.remove(lsd_standalone_offset_sync)
     if lsd_onion_arrow_selection_handler in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.remove(lsd_onion_arrow_selection_handler)
+    if lsd_onion_skin_object_duplicate_handler in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.remove(lsd_onion_skin_object_duplicate_handler)
 
     if _color_refresh_timer_active:
         toggle_color_refresh_timer(0.0)

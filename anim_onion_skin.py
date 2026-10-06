@@ -9,6 +9,7 @@ _cached_data = {}
 _last_selection_state = None
 _last_bone_matrices = {}
 _is_dragging = False
+_last_scene_object_count = -1
 
 def get_bone_lines(obj, depsgraph, bone_names=None):
     lines = []
@@ -417,7 +418,15 @@ def onion_skin_timer_update():
     if settings.onion_skin_enabled and settings.onion_skin_auto_refresh:
         curr_frame = bpy.context.scene.frame_current
         
-        global _last_selection_state, _last_bone_matrices, _is_dragging
+        global _last_selection_state, _last_bone_matrices, _is_dragging, _last_scene_object_count
+        
+        # Auto-disable Timeline Onion Skinning when copying or duplicating objects
+        curr_obj_count = len(bpy.context.scene.objects)
+        if _last_scene_object_count != -1 and curr_obj_count > _last_scene_object_count:
+            _last_scene_object_count = curr_obj_count
+            settings.onion_skin_enabled = False
+            return 1.0
+        _last_scene_object_count = curr_obj_count
         
         # 1. Active Transform Intercept: Monitor bone matrices to detect dragging vs dropping
         is_currently_moving = False
