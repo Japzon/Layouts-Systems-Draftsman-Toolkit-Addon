@@ -42,25 +42,260 @@ def ensure_nla_track(obj, track_name):
 def get_action_fcurves(obj, action):
     """Safely retrieves F-Curves from both legacy Actions and Blender 4.3+ Slotted Actions."""
     fcurves = []
-    if not action: return fcurves
+    if not action:
+        return fcurves
     
-    if hasattr(action, "fcurves"):
-        fcurves.extend(action.fcurves)
-    elif hasattr(action, "slots"):
-        # For Slotted Actions, we must extract fcurves from the channelbags
+    # 1. Slotted Actions (Blender 4.3+ / 5.x)
+    # Check all layers and channelbags directly
+    if hasattr(action, "layers"):
+        try:
+            for layer in action.layers:
+                for cb in getattr(layer, "channelbags", []):
+                    if hasattr(cb, "fcurves") and cb.fcurves:
+                        for fc in cb.fcurves:
+                            if fc not in fcurves:
+                                fcurves.append(fc)
+        except Exception:
+            pass
+            
+    # Also check via action.slots using anim_utils if layers direct access was empty
+    if not fcurves and hasattr(action, "slots") and len(action.slots) > 0:
         try:
             from bpy_extras import anim_utils
             for slot in action.slots:
-                # If obj is provided and we can get the specific slot for this object, great.
-                # Otherwise, just grab from all slots (like when importing)
                 cb = anim_utils.action_get_channelbag_for_slot(action, slot)
-                if cb and hasattr(cb, "fcurves"):
-                    fcurves.extend(cb.fcurves)
+                if cb and hasattr(cb, "fcurves") and cb.fcurves:
+                    for fc in cb.fcurves:
+                        if fc not in fcurves:
+                            fcurves.append(fc)
         except Exception:
             pass
+
+    # 2. Legacy Actions (Blender 4.2 and earlier or unslotted actions)
+    if not fcurves and hasattr(action, "fcurves") and len(action.fcurves) > 0:
+        try:
+            fcurves.extend(action.fcurves)
+        except Exception:
+            pass
+
     return fcurves
+
+def ensure_action_slot(obj, action):
+    """Ensures that the action has a valid slot for the object in Blender 4.3+/5.x Slotted Actions,
+    and returns that slot."""
+    if not action or not hasattr(action, 'slots'):
+        return None
+        
+    target_slot_name = obj.id_data.name if (obj and hasattr(obj, 'id_data')) else (obj.name if obj else "Object")
+    id_type = 'OBJECT'
+    if obj:
+        if hasattr(obj, 'id_type') and obj.id_type in {'OBJECT', 'ARMATURE', 'KEY'}:
+            id_type = obj.id_type
+        elif hasattr(obj, 'id_data') and hasattr(obj.id_data, 'id_type'):
+            id_type = obj.id_data.id_type
+    
+    # 1. First priority: Check all channelbags directly on action.layers!
+    # If a channelbag has F-curves and a valid slot, that slot contains the actual animation!
+    best_slot = None
+    if hasattr(action, "layers"):
+        for layer in action.layers:
+            for cb in getattr(layer, "channelbags", []):
+                if hasattr(cb, "fcurves") and len(cb.fcurves) > 0 and getattr(cb, "slot", None):
+                    best_slot = cb.slot
+                    break
+            if best_slot:
+                break
+
+    # 2. Check via anim_utils if any slot has channelbag curves
+    if not best_slot:
+        try:
+            from bpy_extras import anim_utils
+            for s in action.slots:
+                cb = anim_utils.action_get_channelbag_for_slot(action, s)
+                if cb and hasattr(cb, 'fcurves') and len(cb.fcurves) > 0:
+                    best_slot = s
+                    break
+        except Exception:
+            pass
+
+    # 3. If a slot with curves was found:
+    if best_slot:
+        existing = action.slots.get(target_slot_name)
+        if existing and existing != best_slot:
+            # Check if existing has curves; if not, remove or rename it so best_slot can take the name
+            existing_has_curves = False
+            if hasattr(action, "layers"):
+                for l in action.layers:
+                    for c in getattr(l, "channelbags", []):
+                        if getattr(c, "slot", None) == existing and len(getattr(c, "fcurves", [])) > 0:
+                            existing_has_curves = True
+                            break
+            if not existing_has_curves:
+                try:
+                    action.slots.remove(existing)
+                except Exception:
+                    try:
+                        existing.name = f"{target_slot_name}_unused"
+                    except Exception:
+                        pass
+        try:
+            best_slot.name = target_slot_name
+        except Exception:
+            pass
+        return best_slot
+
+    # 4. If a slot with matching name exists, return it
+    slot = action.slots.get(target_slot_name)
+    if slot:
+        return slot
+
+    # 5. If action already has any slot, rename the first one and return it
+    if len(action.slots) > 0:
+        slot = action.slots[0]
+        try:
+            slot.name = target_slot_name
+        except Exception:
+            pass
+        return slot
+
+    # 6. If action has 0 slots, create a new one with id_type
+    try:
+        slot = action.slots.new(name=target_slot_name, id_type=id_type)
+        return slot
+    except Exception:
+        try:
+            slot = action.slots.new(target_slot_name, id_type)
+        except Exception:
+            try:
+                slot = action.slots.new(name=target_slot_name, id_type='OBJECT')
+            except Exception:
+                try:
+                    slot = action.slots.new(target_slot_name)
+                except Exception:
+                    try:
+                        slot = action.slots.new(name=target_slot_name)
+                    except Exception:
+                        return None
+
+def bind_strip_slot(obj, strip, slot=None):
+    """Binds action_slot on the NlaStrip and obj.animation_data for Blender 4.3+/5.x."""
+    if not strip or not strip.action:
+        return
+    if not slot:
+        slot = ensure_action_slot(obj, strip.action)
+    if not slot:
+        return
+        
+    if hasattr(strip, 'action_slot'):
+        try:
+            strip.action_slot = slot
+        except Exception:
+            pass
+            
+    if obj and obj.animation_data and hasattr(obj.animation_data, 'action_slot'):
+        try:
+            obj.animation_data.action_slot = slot
+        except Exception:
+            pass
+
+    # Ensure channelbag exists for this slot on layer 0 so keyframing immediately works
+    if hasattr(strip.action, 'layers'):
+        if len(strip.action.layers) == 0:
+            try: strip.action.layers.new(name="Layer")
+            except Exception: pass
+        if len(strip.action.layers) > 0:
+            layer = strip.action.layers[0]
+            has_cb = False
+            for cb in getattr(layer, 'channelbags', []):
+                if getattr(cb, 'slot', None) == slot:
+                    has_cb = True
+                    break
+            if not has_cb:
+                try:
+                    layer.channelbags.new(slot)
+                except Exception:
+                    try:
+                        layer.channelbags.new(slot=slot)
+                    except Exception:
+                        pass
+
+def ensure_timeline_frame_display(context):
+    """Enforces frame display (disabling seconds/minutes/milliseconds) and sets proper dopesheet/graph filters."""
+    if not context or not hasattr(context, "window_manager") or not context.window_manager:
+        return
+    try:
+        for w in context.window_manager.windows:
+            if not w.screen:
+                continue
+            for a in w.screen.areas:
+                if a.type in {'DOPESHEET_EDITOR', 'GRAPH_EDITOR', 'NLA_EDITOR'}:
+                    # Strictly enforce Frames instead of seconds/minutes/milliseconds
+                    if hasattr(a.spaces.active, 'show_seconds'):
+                        try:
+                            a.spaces.active.show_seconds = False
+                        except Exception:
+                            pass
+                    if a.type == 'DOPESHEET_EDITOR':
+                        # Keep Timeline / Dopesheet filtered to selected bones/objects to preserve proportionality
+                        if hasattr(a.spaces.active, 'dopesheet'):
+                            try:
+                                a.spaces.active.dopesheet.show_nla = True
+                                a.spaces.active.dopesheet.show_hidden = True
+                                a.spaces.active.dopesheet.show_only_selected = True
+                            except Exception:
+                                pass
+                    elif a.type == 'GRAPH_EDITOR':
+                        # Allow Graph Editor to display active layer channel curves even if unselected
+                        if hasattr(a.spaces.active, 'dopesheet'):
+                            try:
+                                a.spaces.active.dopesheet.show_nla = True
+                                a.spaces.active.dopesheet.show_hidden = True
+                                a.spaces.active.dopesheet.show_only_selected = False
+                            except Exception:
+                                pass
+    except Exception:
+        pass
+
+def ensure_strip_bounds_and_scale(strip, scene_frame_end, is_base=False):
+    """Safely maintains 1:1 scale (scale=1.0) and proper strip boundaries without stretching or jumping."""
+    if not strip or not strip.action:
+        return
+        
+    if hasattr(strip, 'use_sync_length'):
+        strip.use_sync_length = False
+        
+    act = strip.action
+    has_range = hasattr(act, 'frame_range') and (act.frame_range[1] > act.frame_range[0])
+    
+    if has_range:
+        act_start = float(act.frame_range[0])
+        act_end = float(act.frame_range[1])
+        eff_act_start = min(1.0, act_start) if strip.frame_start <= 1.0 else act_start
+        eff_act_end = max(act_end, eff_act_start + 1.0)
+        act_duration = eff_act_end - eff_act_start
+        
+        try:
+            strip.action_frame_start = eff_act_start
+            strip.action_frame_end = eff_act_end
+            strip.scale = 1.0
+            strip.frame_end = strip.frame_start + act_duration
+            strip.scale = 1.0
+        except Exception:
+            pass
+    else:
+        # Empty authoring strip without keyframes yet:
+        # Default to full scene range starting at frame 1.0 so keyframing can occur anywhere
+        try:
+            strip.action_frame_start = 1.0
+            strip.action_frame_end = scene_frame_end
+            strip.frame_start = 1.0
+            strip.frame_end = scene_frame_end
+            strip.scale = 1.0
+        except Exception:
+            pass
+
 def sync_layer_light(context):
-    """Fast, synchronous update for influence and blend type. Does not touch Tweak Mode."""
+    """Fast, synchronous update for influence and blend type. Preserves active layer animation."""
     settings = get_anim_settings(context)
     if not settings.layers_enabled:
         return
@@ -72,6 +307,8 @@ def sync_layer_light(context):
     layer_data = obj.lsd_anim_layers_data
     if not layer_data.layers: return
     
+    scene_frame_end = max(float(context.scene.frame_end), 250.0) if context and context.scene else 250.0
+    
     # Apply to the active object ONLY
     for i, layer in enumerate(layer_data.layers):
         track = None
@@ -81,30 +318,72 @@ def sync_layer_light(context):
                 break
         
         if track:
+            is_base = ("Base_Layer" in layer.name or "Base Layer" in layer.name or "Base_Layer" in track.name or "Base Layer" in track.name)
             for strip in track.strips:
                 strip.blend_type = layer.blend_type
-                strip.extrapolation = 'NOTHING' if layer.blend_type == 'REPLACE' else 'HOLD_FORWARD'
                 strip.influence = 0.0 if layer.is_muted else layer.influence
                 strip.mute = layer.is_muted
                 
                 if strip.action:
+                    bind_strip_slot(obj, strip)
+                    ensure_strip_bounds_and_scale(strip, scene_frame_end, is_base=is_base)
                     for fcurve in get_action_fcurves(obj, strip.action):
                         fcurve.mute = layer.is_muted
+                        
+                if is_base:
+                    strip.extrapolation = 'HOLD'
+                elif layer.blend_type == 'REPLACE':
+                    strip.extrapolation = 'NOTHING'
+                else:
+                    strip.extrapolation = 'HOLD_FORWARD' if strip.frame_start > 1.0 else 'HOLD'
     
     context.view_layer.update()
     
-    # CRITICAL: Muting the active layer while in Tweak Mode causes the Action slot to override the NLA strip!
-    # Instead of forcefully exiting Tweak Mode (which flashes the UI), we can simply mute the active action's F-curves!
+    # Ensure active layer action is retained and not wiped!
     if layer_data.active_layer_index < len(layer_data.layers):
         active_layer = layer_data.layers[layer_data.active_layer_index]
-        
-        # Restore the action if it was cleared while muted
-        if not active_layer.is_muted and not obj.animation_data.action:
-            track = obj.animation_data.nla_tracks.get(active_layer.track_name)
-            if track and track.strips:
+        active_track = None
+        for t in obj.animation_data.nla_tracks:
+            if t.name == active_layer.name or t.name == active_layer.track_name:
+                active_track = t
+                break
+        active_strip = active_track.strips[0] if (active_track and active_track.strips) else None
+
+        if getattr(obj.animation_data, 'use_tweak_mode', False):
+            if not active_layer.is_muted and not obj.animation_data.action and active_strip:
                 try:
-                    obj.animation_data.action = track.strips[0].action
-                except: pass
+                    obj.animation_data.action = active_strip.action
+                    bind_strip_slot(obj, active_strip)
+                except Exception: pass
+            if active_track:
+                active_track.mute = active_layer.is_muted
+        else:
+            if active_strip and not active_layer.is_muted:
+                if active_strip.frame_start <= 1.0:
+                    try:
+                        if obj.animation_data.action != active_strip.action:
+                            obj.animation_data.action = active_strip.action
+                    except Exception: pass
+                    bind_strip_slot(obj, active_strip)
+                    if active_track:
+                        active_track.mute = True  # Muted in NLA so action evaluates strictly once
+                    try:
+                        obj.animation_data.action_blend_type = active_layer.blend_type
+                        obj.animation_data.action_extrapolation = 'HOLD'
+                    except Exception: pass
+                else:
+                    if active_track:
+                        active_track.mute = False
+                    bind_strip_slot(obj, active_strip)
+                    try:
+                        obj.animation_data.action = None
+                    except Exception: pass
+            elif active_layer.is_muted:
+                try:
+                    obj.animation_data.action = None
+                except Exception: pass
+                if active_track:
+                    active_track.mute = True
                 
         if obj.animation_data and obj.animation_data.action:
             for fcurve in get_action_fcurves(obj, obj.animation_data.action):
@@ -121,6 +400,8 @@ def sync_layer_light(context):
             
     context.view_layer.update()
     reset_auto_keyframe_cache()
+    ensure_timeline_frame_display(context)
+
 def execute_sync_logic(context, enter_tweak_mode=True):
     """Core logic to restructure NLA tracks."""
     settings = get_anim_settings(context)
@@ -134,14 +415,21 @@ def execute_sync_logic(context, enter_tweak_mode=True):
     layer_data = obj.lsd_anim_layers_data
     if not layer_data.layers: return
 
-    # Aggressively repair existing broken files: forcibly unmute the base track so the base animation is never frozen
+    scene_frame_end = max(float(context.scene.frame_end), 250.0) if context and context.scene else 250.0
+
+    # Aggressively repair existing broken files: forcibly unmute the base track so the base animation is never frozen,
+    # and repair base strip extrapolation and frame boundaries
     for track in obj.animation_data.nla_tracks:
         if "Base_Layer" in track.name or "Base Layer" in track.name:
             track.mute = False
+            for strip in track.strips:
+                strip.extrapolation = 'HOLD'
+                if strip.frame_start <= -99990:
+                    strip.frame_start = 1.0
+                ensure_strip_bounds_and_scale(strip, scene_frame_end, is_base=True)
 
     # 1. Apply muting and blending settings to the active object ONLY
     for i, layer in enumerate(layer_data.layers):
-        # Check if this object actually has a track for this layer
         track = None
         for t in obj.animation_data.nla_tracks:
             if t.name == layer.name or t.name == layer.track_name:
@@ -160,21 +448,25 @@ def execute_sync_logic(context, enter_tweak_mode=True):
             track.mute = layer.is_muted
             track.lock = layer.is_locked
             
+            is_base = ("Base_Layer" in layer.name or "Base Layer" in layer.name or "Base_Layer" in track.name or "Base Layer" in track.name)
             # In NLA, strips hold the influence and blend_type
             for strip in track.strips:
                 strip.blend_type = layer.blend_type
-                
-                # Forcibly drop the strip influence to 0 and explicitly mute the strip itself
                 strip.influence = 0.0 if layer.is_muted else layer.influence
                 strip.mute = layer.is_muted
                 
                 if strip.action:
+                    bind_strip_slot(obj, strip)
+                    ensure_strip_bounds_and_scale(strip, scene_frame_end, is_base=is_base)
                     for fcurve in get_action_fcurves(obj, strip.action):
                         fcurve.mute = layer.is_muted
                 
-                strip.extrapolation = 'NOTHING' if layer.blend_type == 'REPLACE' else 'HOLD_FORWARD'
-                if hasattr(strip, 'use_sync_length'):
-                    strip.use_sync_length = True
+                if is_base:
+                    strip.extrapolation = 'HOLD'
+                elif layer.blend_type == 'REPLACE':
+                    strip.extrapolation = 'NOTHING'
+                else:
+                    strip.extrapolation = 'HOLD_FORWARD' if strip.frame_start > 1.0 else 'HOLD'
                         
     def safe_enter_tweak_mode(context_ref, o, t, s):
         if not o or not o.animation_data: return
@@ -203,8 +495,16 @@ def execute_sync_logic(context, enter_tweak_mode=True):
                                 for st in tr.strips: st.select = False
                             t.select = True
                             s.select = True
+                            try:
+                                o.animation_data.nla_tracks.active = t
+                            except Exception: pass
+                            bind_strip_slot(o, s)
                             try: bpy.ops.nla.tweakmode_enter(isolate_action=False)
                             except: pass
+                            bind_strip_slot(o, s)
+                            
+                            # Ensure timeline displays strictly in frames and graph editor displays curves
+                            ensure_timeline_frame_display(context_ref)
                     return
             
     active_layer = None
@@ -221,6 +521,7 @@ def execute_sync_logic(context, enter_tweak_mode=True):
 
         if active_track.strips:
             obj.animation_data.use_nla = True
+            active_strip = active_track.strips[0]
             
             # Set the track as the active track for Tweak Mode
             for t in obj.animation_data.nla_tracks:
@@ -229,63 +530,31 @@ def execute_sync_logic(context, enter_tweak_mode=True):
                     s.select = False
             
             active_track.select = True
-            active_track.strips[0].select = True
+            active_strip.select = True
             
             try:
-                # Explicitly set the internal active track pointer so Blender doesn't tweak the wrong one!
                 obj.animation_data.nla_tracks.active = active_track
-                
-                if not active_track.strips and getattr(obj.animation_data, "action", None):
-                    # Auto-push the floating action if a new layer was created and user started animating
-                    strip = active_track.strips.new(
-                        name=active_track.name,
-                        start=int(obj.animation_data.action.frame_range[0]),
-                        action=obj.animation_data.action
-                    )
-                    strip.blend_type = active_layer.blend_type
-                    strip.extrapolation = 'HOLD' if active_layer.blend_type == 'REPLACE' else 'HOLD_FORWARD'
-                    if hasattr(strip, 'use_sync_length'):
-                        strip.use_sync_length = True
-                    try:
-                        obj.animation_data.action_blend_type = active_layer.blend_type
-                        obj.animation_data.action_extrapolation = 'HOLD' if active_layer.blend_type == 'REPLACE' else 'HOLD_FORWARD'
-                    except: pass
-                elif not active_track.strips:
-                    # Create an empty strip so tweak mode has something to lock onto and blend type applies
-                    empty_action = bpy.data.actions.new(name=active_track.name)
-                        
-                    strip = active_track.strips.new(
-                        name=active_track.name,
-                        start=1,
-                        action=empty_action
-                    )
-                    strip.blend_type = active_layer.blend_type
-                    strip.extrapolation = 'HOLD' if active_layer.blend_type == 'REPLACE' else 'HOLD_FORWARD'
-                    if hasattr(strip, 'use_sync_length'):
-                        strip.use_sync_length = True
+            except Exception: pass
+            
+            bind_strip_slot(obj, active_strip)
 
-                # Retroactively ensure all existing strips use true infinite mapping to bypass Tweak Mode freeze
-                if active_track.strips:
-                    existing_strip = active_track.strips[0]
-                    existing_strip.blend_type = active_layer.blend_type
-                    existing_strip.extrapolation = 'NOTHING' if active_layer.blend_type == 'REPLACE' else 'HOLD_FORWARD'
-                    if hasattr(existing_strip, 'use_sync_length'):
-                        existing_strip.use_sync_length = True
-                active_track.strips[0].active = True
+            # Retroactively ensure all existing strips use proper bounds and 1:1 scale
+            for t in obj.animation_data.nla_tracks:
+                is_b = ("Base_Layer" in t.name or "Base Layer" in t.name)
+                for s in t.strips:
+                    ensure_strip_bounds_and_scale(s, scene_frame_end, is_base=is_b)
                 
-                try:
-                    obj.animation_data.action_blend_type = active_layer.blend_type
-                    obj.animation_data.action_extrapolation = 'HOLD' if active_layer.blend_type == 'REPLACE' else 'HOLD_FORWARD'
-                except: pass
-            except:
-                pass
+            try:
+                obj.animation_data.action_blend_type = active_layer.blend_type
+                obj.animation_data.action_extrapolation = 'HOLD' if active_layer.blend_type == 'REPLACE' else 'HOLD'
+            except Exception: pass
             
             # Try to assign the active track if the API supports it
             try:
                 for t in obj.animation_data.nla_tracks:
                     t.is_solo = False
                 active_track.is_solo = False
-            except: pass
+            except Exception: pass
             
             # Ensure the action matches the layer state
             try:
@@ -298,28 +567,42 @@ def execute_sync_logic(context, enter_tweak_mode=True):
                                         try: bpy.ops.nla.tweakmode_exit(isolate_action=False)
                                         except: pass
                                     break
-                    if not getattr(obj.animation_data, 'use_tweak_mode', False):
-                        obj.animation_data.action = None
-                elif active_track.strips:
+                    obj.animation_data.action = None
+                    active_track.mute = True
+                else:
                     if enter_tweak_mode:
-                        safe_enter_tweak_mode(context, obj, active_track, active_track.strips[0])
-                    # Ensure action does not float and double-evaluate if tweak mode is off
-                    if not getattr(obj.animation_data, 'use_tweak_mode', False):
-                        obj.animation_data.action = None
-            except: pass
-                
-            # Ensure NLA track visibility is ON in Dopesheet so the user can still see base animation keyframes in the Timeline
-            for window in context.window_manager.windows:
-                for area in window.screen.areas:
-                    if area.type in {'GRAPH_EDITOR', 'DOPESHEET_EDITOR'}:
-                        if hasattr(area.spaces.active, 'dopesheet'):
+                        safe_enter_tweak_mode(context, obj, active_track, active_strip)
+                    
+                    if getattr(obj.animation_data, 'use_tweak_mode', False):
+                        active_track.mute = False
+                        bind_strip_slot(obj, active_strip)
+                    else:
+                        # Dual-mode support: If Tweak Mode is not active (e.g. no NLA Editor open in layout),
+                        # directly assign the active layer's action to obj.animation_data.action if frame_start <= 1.0
+                        # so native keyframing (I / auto-key) writes to this layer.
+                        # For strips with frame_start > 1.0, they MUST evaluate through NLA track so timeline offsets are respected!
+                        if active_strip.frame_start <= 1.0:
+                            obj.animation_data.action = active_strip.action
+                            bind_strip_slot(obj, active_strip)
+                            active_track.mute = True
                             try:
-                                area.spaces.active.dopesheet.show_nla = True
-                            except: pass
+                                obj.animation_data.action_blend_type = active_layer.blend_type
+                                obj.animation_data.action_extrapolation = 'HOLD'
+                            except Exception: pass
+                        else:
+                            active_track.mute = False
+                            bind_strip_slot(obj, active_strip)
+                            try:
+                                obj.animation_data.action = None
+                            except Exception: pass
+            except Exception: pass
+                
+            # Ensure timeline displays in frames and proper curve visibility
+            ensure_timeline_frame_display(context)
             
     # Now configure the active track ONLY for the active object
-            if active_layer and active_track:
-                pass
+    if active_layer and active_track:
+        pass
 
 def invisible_tweakmode_swap(context, exit_first=False, enter_second=False):
     """Executes Tweak Mode transitions invisibly within a single frame redraw, avoiding UI flashes."""
@@ -350,14 +633,6 @@ def invisible_tweakmode_swap(context, exit_first=False, enter_second=False):
             
     if not target_area:
         # Fallback to pure logic if no safe area exists
-        if exit_first and obj and obj.animation_data:
-            if getattr(obj.animation_data, 'use_tweak_mode', False):
-                try: bpy.ops.nla.tweakmode_exit(isolate_action=False)
-                except: pass
-            if not getattr(obj.animation_data, 'use_tweak_mode', False):
-                try:
-                    obj.animation_data.action = None
-                except: pass
         execute_sync_logic(context, enter_tweak_mode=enter_second)
         return
         
@@ -391,15 +666,6 @@ def invisible_tweakmode_swap(context, exit_first=False, enter_second=False):
                     try: bpy.ops.nla.tweakmode_exit(isolate_action=False)
                     except:
                         try: bpy.ops.nla.tweakmode_exit()
-                        except: pass
-                    
-                obj = get_active_object(context)
-                if obj and obj.animation_data:
-                    # CRITICAL: If tweakmode_exit failed (we are still in Tweak Mode), do NOT set action = None
-                    # Otherwise Blender will permanently erase the action from the NLA strip!
-                    if not getattr(obj.animation_data, 'use_tweak_mode', False):
-                        try:
-                            obj.animation_data.action = None  # Prevent old layer action from leaking
                         except: pass
                     
                 execute_sync_logic(context, enter_tweak_mode=enter_second)

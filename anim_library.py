@@ -148,6 +148,7 @@ from bpy_extras.io_utils import ImportHelper
 class LSD_OT_Anim_Library_Select_Dir(bpy.types.Operator):
     bl_idname = "lsd.anim_library_select_dir"
     bl_label = "Select Animation Layer Folder"
+    bl_description = "Select folder for Animation Layer Library"
     
     directory: bpy.props.StringProperty(
         name="Folder Path",
@@ -172,6 +173,7 @@ class LSD_OT_Anim_Library_Select_Dir(bpy.types.Operator):
 class LSD_OT_Anim_Library_Refresh(bpy.types.Operator):
     bl_idname = "lsd.anim_library_refresh"
     bl_label = "Refresh Library"
+    bl_description = "Scan library folder and reload animation items and previews"
     
     def execute(self, context):
         load_previews()
@@ -180,10 +182,10 @@ class LSD_OT_Anim_Library_Refresh(bpy.types.Operator):
         settings.library_items.clear()
         
         lib_path = get_library_path()
-        for item in os.listdir(lib_path):
-            if item.endswith(".blend"):
-                layer_name = item.replace(".blend", "")
-                if os.path.isdir(os.path.join(lib_path, f"{layer_name}_preview")):
+        if os.path.exists(lib_path) and os.path.isdir(lib_path):
+            for item in sorted(os.listdir(lib_path)):
+                if item.endswith(".blend") and not item.startswith("."):
+                    layer_name = item[:-6]
                     new_item = settings.library_items.add()
                     new_item.name = layer_name
                     new_item.filepath = os.path.join(lib_path, item)
@@ -196,8 +198,17 @@ class LSD_OT_Anim_Library_Refresh(bpy.types.Operator):
                                 meta = json.load(f)
                                 new_item.target_type = meta.get("target_type", "")
                                 new_item.target_name = meta.get("target_name", "")
-                        except: pass
-                
+                        except Exception:
+                            pass
+                            
+        count = len(settings.library_items)
+        if count > 0:
+            if settings.active_library_index >= count or settings.active_library_index < 0:
+                settings.active_library_index = 0
+            self.report({'INFO'}, f"Library refreshed: {count} item{'s' if count != 1 else ''} found")
+        else:
+            self.report({'INFO'}, "Library refreshed: No .blend files found in selected folder")
+            
         return {'FINISHED'}
 
 class LSD_OT_Anim_Library_Delete(bpy.types.Operator):
@@ -356,40 +367,133 @@ def _render_preview_sequence(context, obj, track, action, preview_dir, start_f=N
 class LSD_OT_Anim_Library_Update_Preview(bpy.types.Operator):
     bl_idname = "lsd.anim_library_update_preview"
     bl_label = "Update Preview"
-    bl_description = "Recapture the animated preview for the selected library item based on the active scene layer"
+    bl_description = "Recapture the animated preview for the selected library item based on the active scene layer or action"
     
     def execute(self, context):
+        import layouts_systems_draftsman_toolkit.anim_core as anim_core
         settings = context.scene.lsd_anim_settings
-        if not settings.library_items or settings.active_library_index >= len(settings.library_items):
-            self.report({'ERROR'}, "No library item selected")
+        if not settings.library_items:
+            self.report({'WARNING'}, "No animation items in library to preview")
             return {'CANCELLED'}
+            
+        if settings.active_library_index < 0 or settings.active_library_index >= len(settings.library_items):
+            settings.active_library_index = 0
             
         item = settings.library_items[settings.active_library_index]
-        obj = context.active_object
-        
-        if not obj or not obj.animation_data:
-            self.report({'ERROR'}, "No object/animation data selected")
+        obj = anim_core.get_active_object(context)
+        if not obj:
+            obj = context.active_object
+        if not obj and context.selected_objects:
+            obj = context.selected_objects[0]
+            
+        if not obj:
+            self.report({'ERROR'}, "Please select an object in the 3D Viewport to render preview")
             return {'CANCELLED'}
             
-        layer_data = obj.lsd_anim_layers_data
+        layer_data = getattr(obj, 'lsd_anim_layers_data', None)
+        layer = None
+        track = None
+        action = None
         
-        if layer_data.active_layer_index < 0 or layer_data.active_layer_index >= len(layer_data.layers):
-            self.report({'ERROR'}, "No active layer selected")
+        if layer_data and len(layer_data.layers) > 0 and 0 <= layer_data.active_layer_index < len(layer_data.layers):
+            layer = layer_data.layers[layer_data.active_layer_index]
+            if obj.animation_data:
+                track = obj.animation_data.nla_tracks.get(layer.track_name if layer.track_name else layer.name)
+                if track and track.strips:
+                    action = track.strips[0].action
+                else:
+                    action = obj.animation_data.action
+                    
+        if not action and obj.animation_data:
+            if obj.animation_data.action:
+                action = obj.animation_data.action
+            elif obj.animation_data.nla_tracks:
+                for t in obj.animation_data.nla_tracks:
+                    if not t.mute and t.strips:
+                        track = t
+                        action = t.strips[0].action
+                        break
+                if not action:
+                    for t in obj.animation_data.nla_tracks:
+                        if t.strips:
+                            track = t
+                            action = t.strips[0].action
+                            break
+                            
+        temp_loaded_action = None
+        orig_action = None
+        orig_action_slot = None
+        
+        if not action:
+            # Fallback: Load the action from the selected library item's blend file
+            if hasattr(item, 'filepath') and item.filepath and os.path.exists(item.filepath):
+                try:
+                    with bpy.data.libraries.load(item.filepath) as (data_from, data_to):
+                        data_to.actions = data_from.actions
+                    if data_to.actions:
+                        temp_loaded_action = data_to.actions[0]
+                        action = temp_loaded_action
+                except Exception as e:
+                    print(f"Failed to load action from library item file: {e}")
+                    
+        if not action:
+            self.report({'ERROR'}, "No active animation found to preview")
             return {'CANCELLED'}
             
-        layer = layer_data.layers[layer_data.active_layer_index]
-        track = obj.animation_data.nla_tracks.get(layer.track_name if layer.track_name else layer.name)
-        if not track or not track.strips:
-            action = obj.animation_data.action
-            if not action:
-                self.report({'ERROR'}, "No active animation found to preview")
-                return {'CANCELLED'}
-        else:
-            action = track.strips[0].action
+        if temp_loaded_action and obj:
+            if not obj.animation_data:
+                obj.animation_data_create()
+            orig_action = obj.animation_data.action
+            orig_action_slot = getattr(obj.animation_data, 'action_slot', None)
+            try:
+                obj.animation_data.action = temp_loaded_action
+                anim_core.ensure_action_slot(obj, temp_loaded_action)
+            except Exception:
+                pass
+                
+        try:
+            preview_dir = get_preview_dir(item.name)
             
-        preview_dir = get_preview_dir(item.name)
-        _render_preview_sequence(context, obj, track, action, preview_dir)
-        
+            # If upload_selection is KEYFRAMES and user has keyframes selected in the active action, limit preview range
+            start_f = None
+            end_f = None
+            if getattr(settings, 'upload_selection', 'LAYER') == 'KEYFRAMES' and not temp_loaded_action:
+                try:
+                    source_fcurves = anim_core.get_action_fcurves(obj, action)
+                    sel_frames = set()
+                    for fc in source_fcurves:
+                        for kp in fc.keyframe_points:
+                            if getattr(kp, 'select_control_point', False) or getattr(kp, 'select_left_handle', False) or getattr(kp, 'select_right_handle', False):
+                                sel_frames.add(kp.co.x)
+                    if sel_frames:
+                        s_action_f = min(sel_frames)
+                        e_action_f = max(sel_frames)
+                        if track and track.strips:
+                            strip = track.strips[0]
+                            offset = strip.frame_start - (strip.action_frame_start * strip.scale)
+                            start_f = int(round((s_action_f * strip.scale) + offset))
+                            end_f = int(round((e_action_f * strip.scale) + offset))
+                        else:
+                            start_f = int(round(s_action_f))
+                            end_f = int(round(e_action_f))
+                except Exception:
+                    pass
+                    
+            _render_preview_sequence(context, obj, track, action, preview_dir, start_f=start_f, end_f=end_f)
+        finally:
+            if temp_loaded_action:
+                if obj and obj.animation_data:
+                    try:
+                        obj.animation_data.action = orig_action
+                        if orig_action_slot:
+                            obj.animation_data.action_slot = orig_action_slot
+                    except Exception:
+                        pass
+                try:
+                    bpy.data.actions.remove(temp_loaded_action)
+                except Exception:
+                    pass
+                    
         bpy.ops.lsd.anim_library_refresh()
         self.report({'INFO'}, f"Updated preview for {item.name}")
         return {'FINISHED'}
@@ -397,35 +501,56 @@ class LSD_OT_Anim_Library_Update_Preview(bpy.types.Operator):
 class LSD_OT_Anim_Library_Export(bpy.types.Operator):
     bl_idname = "lsd.anim_library_export"
     bl_label = "Export Active Layer"
+    bl_description = "Export active animation layer or selected keyframes to the Animation Layer Library"
     
     def execute(self, context):
         import layouts_systems_draftsman_toolkit.anim_core as anim_core
         obj = anim_core.get_active_object(context)
-        
-        if not obj or not hasattr(obj, 'lsd_anim_layers_data'):
+        if not obj:
+            obj = context.active_object
+        if not obj and context.selected_objects:
+            obj = context.selected_objects[0]
+            
+        if not obj:
+            self.report({'ERROR'}, "No active object selected")
             return {'CANCELLED'}
             
-        layer_data = obj.lsd_anim_layers_data
-        
-        if layer_data.active_layer_index < 0 or layer_data.active_layer_index >= len(layer_data.layers):
-            self.report({'ERROR'}, "No active layer to export")
+        if not obj.animation_data:
+            self.report({'ERROR'}, "No animation data found on selected object")
             return {'CANCELLED'}
             
-        layer = layer_data.layers[layer_data.active_layer_index]
+        layer_data = getattr(obj, 'lsd_anim_layers_data', None)
+        layer = None
+        track = None
+        action = None
         
-        if not obj or not obj.animation_data:
-            self.report({'ERROR'}, "No object/animation data selected")
+        if layer_data and len(layer_data.layers) > 0 and 0 <= layer_data.active_layer_index < len(layer_data.layers):
+            layer = layer_data.layers[layer_data.active_layer_index]
+            track = obj.animation_data.nla_tracks.get(layer.track_name if layer.track_name else layer.name)
+            if track and track.strips:
+                action = track.strips[0].action
+            else:
+                action = obj.animation_data.action
+                
+        if not action:
+            if obj.animation_data.action:
+                action = obj.animation_data.action
+            elif obj.animation_data.nla_tracks:
+                for t in obj.animation_data.nla_tracks:
+                    if not t.mute and t.strips:
+                        track = t
+                        action = t.strips[0].action
+                        break
+                if not action:
+                    for t in obj.animation_data.nla_tracks:
+                        if t.strips:
+                            track = t
+                            action = t.strips[0].action
+                            break
+                            
+        if not action:
+            self.report({'ERROR'}, "No active animation or action found to export")
             return {'CANCELLED'}
-            
-        # Get action from the track
-        track = obj.animation_data.nla_tracks.get(layer.track_name if layer.track_name else layer.name)
-        if not track or not track.strips:
-            action = obj.animation_data.action
-            if not action:
-                self.report({'ERROR'}, "No animation data found on this layer")
-                return {'CANCELLED'}
-        else:
-            action = track.strips[0].action
             
         settings = context.scene.lsd_anim_settings
         
@@ -437,14 +562,15 @@ class LSD_OT_Anim_Library_Export(bpy.types.Operator):
         source_fcurves = anim_core.get_action_fcurves(obj, action)
         
         # Calculate the physical timeline frame range from action keyframes + strip transformation
+        sel_frames = set()
         if getattr(settings, 'upload_selection', 'LAYER') == 'KEYFRAMES':
-            sel_frames = set()
             try:
                 for fc in source_fcurves:
                     for kp in fc.keyframe_points:
-                        if kp.select_control_point:
+                        if getattr(kp, 'select_control_point', False) or getattr(kp, 'select_left_handle', False) or getattr(kp, 'select_right_handle', False):
                             sel_frames.add(kp.co.x)
-            except: pass
+            except Exception:
+                pass
             
             if sel_frames:
                 s_action_f = min(sel_frames)
@@ -458,7 +584,7 @@ class LSD_OT_Anim_Library_Export(bpy.types.Operator):
                     start_f = int(round(s_action_f))
                     end_f = int(round(e_action_f))
             else:
-                self.report({'WARNING'}, "No keyframes selected in timeline. Exporting entire layer range.")
+                self.report({'WARNING'}, "No keyframes selected in timeline. Exporting entire animation range.")
                 
         if start_f == float('inf'):
             try:
@@ -466,7 +592,8 @@ class LSD_OT_Anim_Library_Export(bpy.types.Operator):
                     if fc.keyframe_points:
                         start_f = min(start_f, fc.keyframe_points[0].co.x)
                         end_f = max(end_f, fc.keyframe_points[-1].co.x)
-            except: pass
+            except Exception:
+                pass
             
             if start_f == float('inf'):
                 start_f = context.scene.frame_start
@@ -484,149 +611,80 @@ class LSD_OT_Anim_Library_Export(bpy.types.Operator):
         if end_f < start_f:
             end_f = start_f
 
-        # Identify animated bones / objects referenced in this layer's action
-        animated_bones = set()
-        animated_object_paths = set()
-        for fc in source_fcurves:
-            if fc.data_path.startswith('pose.bones["'):
-                bone_name = fc.data_path.split('pose.bones["')[1].split('"]')[0]
-                animated_bones.add(bone_name)
-            else:
-                animated_object_paths.add(fc.data_path)
-
-        # Bake capture the evaluated composite transforms strictly from start_f to end_f
-        orig_current_frame = context.scene.frame_current
-        baked_action = bpy.data.actions.new(name=f"{layer.name}_BakeCapture")
+        # Clone the layer's action with 100% fidelity (all slots, channelbags, fcurves, handles, and keyframes)
+        export_action = action.copy()
         
-        # Helper to get or create an F-curve on baked_action regardless of Blender version (legacy vs Slotted Actions)
-        def _get_or_create_fc(act, target_obj, data_path, index):
-            # Try legacy root fcurves first if available
-            if hasattr(act, "fcurves") and not hasattr(act, "slots"):
-                fc = act.fcurves.find(data_path, index=index)
-                if not fc:
-                    fc = act.fcurves.new(data_path, index=index)
-                return fc
-            elif hasattr(act, "slots"):
-                try:
-                    slot_name = target_obj.id_data.name if hasattr(target_obj, 'id_data') else target_obj.name
-                    slot = act.slots.get(slot_name)
-                    if not slot:
-                        slot = act.slots.new(name=slot_name)
-                        
-                    from bpy_extras import anim_utils
-                    cb = anim_utils.action_get_channelbag_for_slot(act, slot)
-                    if cb is None:
-                        # Ensure channelbag exists for this slot
-                        try:
-                            cb = act.layers[0].channelbags.new(slot=slot)
-                        except Exception:
-                            cb = anim_utils.action_get_channelbag_for_slot(act, slot)
-                            
-                    if cb and hasattr(cb, "fcurves"):
-                        fc = cb.fcurves.find(data_path, index=index)
-                        if not fc:
-                            fc = cb.fcurves.new(data_path, index=index)
-                        return fc
-                except Exception as e:
-                    print(f"Error creating slotted fcurve for {data_path}[{index}]: {e}")
+        # If user selected KEYFRAMES only, cull unselected keyframe points
+        if getattr(settings, 'upload_selection', 'LAYER') == 'KEYFRAMES' and sel_frames:
+            for exp_fc in anim_core.get_action_fcurves(obj, export_action):
+                for i in range(len(exp_fc.keyframe_points) - 1, -1, -1):
+                    kp = exp_fc.keyframe_points[i]
+                    is_sel = getattr(kp, 'select_control_point', False) or getattr(kp, 'select_left_handle', False) or getattr(kp, 'select_right_handle', False) or (kp.co.x in sel_frames)
+                    if not is_sel:
+                        exp_fc.keyframe_points.remove(kp)
+                exp_fc.update()
+                
+        # Normalize time so the exported action begins at frame 1.0
+        exp_fcurves = anim_core.get_action_fcurves(obj, export_action)
+        exp_min_frame = float('inf')
+        for fc in exp_fcurves:
+            for kp in fc.keyframe_points:
+                if kp.co.x < exp_min_frame:
+                    exp_min_frame = kp.co.x
                     
-            # Fallback if slots failed or fcurves is direct
-            if hasattr(act, "fcurves"):
-                fc = act.fcurves.find(data_path, index=index)
-                if not fc:
-                    fc = act.fcurves.new(data_path, index=index)
-                return fc
-            return None
-
-        # Determine bake channels per animated target
-        try:
-            for f in range(start_f, end_f + 1):
-                context.scene.frame_set(f)
-                context.view_layer.update()
-                
-                # Relative frame index in the new action (starts at frame 1)
-                action_frame = float(f - start_f + 1)
-                
-                if obj.type == 'ARMATURE' and animated_bones and obj.pose:
-                    for bname in animated_bones:
-                        pbone = obj.pose.bones.get(bname)
-                        if not pbone: continue
-                        
-                        bone_prefix = f'pose.bones["{bname}"]'
-                        
-                        # Bake location
-                        for idx, val in enumerate(pbone.location):
-                            fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.location", idx)
-                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                            
-                        # Bake rotation
-                        rot_mode = getattr(pbone, "rotation_mode", "QUATERNION")
-                        if rot_mode == 'QUATERNION':
-                            for idx, val in enumerate(pbone.rotation_quaternion):
-                                fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.rotation_quaternion", idx)
-                                if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                        elif rot_mode == 'AXIS_ANGLE':
-                            for idx, val in enumerate(pbone.rotation_axis_angle):
-                                fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.rotation_axis_angle", idx)
-                                if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                        else:
-                            for idx, val in enumerate(pbone.rotation_euler):
-                                fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.rotation_euler", idx)
-                                if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                                
-                        # Bake scale
-                        for idx, val in enumerate(pbone.scale):
-                            fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.scale", idx)
-                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                else:
-                    # Object level transforms
-                    for idx, val in enumerate(obj.location):
-                        fc = _get_or_create_fc(baked_action, obj, "location", idx)
-                        if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                        
-                    rot_mode = getattr(obj, "rotation_mode", "QUATERNION")
-                    if rot_mode == 'QUATERNION':
-                        for idx, val in enumerate(obj.rotation_quaternion):
-                            fc = _get_or_create_fc(baked_action, obj, "rotation_quaternion", idx)
-                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                    elif rot_mode == 'AXIS_ANGLE':
-                        for idx, val in enumerate(obj.rotation_axis_angle):
-                            fc = _get_or_create_fc(baked_action, obj, "rotation_axis_angle", idx)
-                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                    else:
-                        for idx, val in enumerate(obj.rotation_euler):
-                            fc = _get_or_create_fc(baked_action, obj, "rotation_euler", idx)
-                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                            
-                    for idx, val in enumerate(obj.scale):
-                        fc = _get_or_create_fc(baked_action, obj, "scale", idx)
-                        if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
-                        
-            for fc in anim_core.get_action_fcurves(obj, baked_action):
+        if exp_min_frame != float('inf') and abs(exp_min_frame - 1.0) > 0.0001:
+            time_shift = 1.0 - exp_min_frame
+            for fc in exp_fcurves:
+                for kp in fc.keyframe_points:
+                    kp.co.x += time_shift
+                    kp.handle_left.x += time_shift
+                    kp.handle_right.x += time_shift
                 fc.update()
-        finally:
-            context.scene.frame_set(orig_current_frame)
-            
-        export_action = baked_action
+                
+        # Account for NLA strip scale if user stretched or compressed the strip
+        if track and track.strips and abs(track.strips[0].scale - 1.0) > 0.0001:
+            strip_scale = track.strips[0].scale
+            for fc in exp_fcurves:
+                for kp in fc.keyframe_points:
+                    kp.co.x = 1.0 + ((kp.co.x - 1.0) * strip_scale)
+                    kp.handle_left.x = 1.0 + ((kp.handle_left.x - 1.0) * strip_scale)
+                    kp.handle_right.x = 1.0 + ((kp.handle_right.x - 1.0) * strip_scale)
+                fc.update()
+
+        anim_core.ensure_action_slot(obj, export_action)
         export_action.use_fake_user = True
                 
         lib_path = get_library_path()
-        base_name = layer.name
+        if layer:
+            raw_name = layer.name
+        elif action and action.name and action.name != "Action":
+            raw_name = action.name
+        elif getattr(settings, 'upload_selection', 'LAYER') == 'KEYFRAMES':
+            raw_name = f"{obj.name}_Keyframes"
+        else:
+            raw_name = f"{obj.name}_Layer"
+            
+        base_name = raw_name
         out_filepath = os.path.join(lib_path, f"{base_name}.blend")
         counter = 1
         while os.path.exists(out_filepath):
-            base_name = f"{layer.name}_{counter:03d}"
+            base_name = f"{raw_name}_{counter:03d}"
             out_filepath = os.path.join(lib_path, f"{base_name}.blend")
             counter += 1
             
-        layer.name = base_name
+        if layer:
+            layer.name = base_name
         export_action.name = base_name
         
         # Save action to blend file with fake_user=True
         bpy.data.libraries.write(out_filepath, {export_action}, fake_user=True)
+        try:
+            bpy.data.actions.remove(export_action)
+        except Exception:
+            pass
         
         # Render preview images using OpenGL Viewport render of the full composite viewport
-        preview_dir = get_preview_dir(layer.name)
+        preview_dir = get_preview_dir(base_name)
         _render_preview_sequence(context, obj, track, action, preview_dir, start_f=start_f, end_f=end_f)
         
         # Save metadata without erasing fps/frame_range/step
@@ -638,10 +696,12 @@ class LSD_OT_Anim_Library_Export(bpy.types.Operator):
             if os.path.exists(meta_filepath):
                 with open(meta_filepath, 'r') as f:
                     meta = json.load(f)
-        except: pass
+        except Exception:
+            pass
         
         meta["target_type"] = obj.type
         meta["target_name"] = obj.name
+        meta["blend_type"] = layer.blend_type if layer else getattr(settings, 'import_blend_type', 'COMBINE')
         
         try:
             with open(meta_filepath, 'w') as f:
@@ -650,6 +710,7 @@ class LSD_OT_Anim_Library_Export(bpy.types.Operator):
             print(f"Failed to save metadata for library item: {e}")
             
         bpy.ops.lsd.anim_library_refresh()
+        self.report({'INFO'}, f"Successfully exported layer '{base_name}' to Library")
         return {'FINISHED'}
 
 class LSD_OT_Anim_Library_Import(bpy.types.Operator):
@@ -657,11 +718,23 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
     bl_label = "Import Layer"
     
     def execute(self, context):
+        import_frame = float(context.scene.frame_current)
         settings = context.scene.lsd_anim_settings
         if not settings.library_items or settings.active_library_index >= len(settings.library_items):
             return {'CANCELLED'}
             
         item = settings.library_items[settings.active_library_index]
+        
+        # Load metadata if present
+        item_meta = {}
+        try:
+            preview_dir = get_preview_dir(item.name)
+            meta_path = os.path.join(preview_dir, "meta.json")
+            if os.path.exists(meta_path):
+                with open(meta_path, 'r') as f:
+                    item_meta = json.load(f)
+        except Exception:
+            pass
         
         # Append action
         with bpy.data.libraries.load(item.filepath) as (data_from, data_to):
@@ -703,13 +776,45 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                 return {'CANCELLED'}
         
         # Ensure slots match the active object so the poses evaluate correctly on different rigs
+        target_slot = None
         if obj and hasattr(action, 'slots'):
-            try:
-                target_slot_name = obj.id_data.name if hasattr(obj, 'id_data') else obj.name
-                for slot in action.slots:
-                    slot.name = target_slot_name
-            except Exception as e:
-                print(f"Failed to rename imported action slot: {e}")
+            target_slot = anim_core.ensure_action_slot(obj, action)
+            
+            # If action has legacy fcurves and slot was created, migrate them into the channelbag
+            if target_slot and hasattr(action, 'fcurves') and len(action.fcurves) > 0:
+                try:
+                    from bpy_extras import anim_utils
+                    cb = anim_utils.action_get_channelbag_for_slot(action, target_slot)
+                    if cb is None and hasattr(action, 'layers'):
+                        act_layer = action.layers[0] if len(action.layers) > 0 else action.layers.new("Layer")
+                        try:
+                            cb = act_layer.channelbags.new(target_slot)
+                        except Exception:
+                            try:
+                                cb = act_layer.channelbags.new(slot=target_slot)
+                            except Exception:
+                                pass
+                    if cb and hasattr(cb, 'fcurves') and len(cb.fcurves) == 0:
+                        for old_fc in list(action.fcurves):
+                            new_fc = None
+                            try:
+                                new_fc = cb.fcurves.new(old_fc.data_path, old_fc.array_index)
+                            except Exception:
+                                try:
+                                    new_fc = cb.fcurves.new(old_fc.data_path, index=old_fc.array_index)
+                                except Exception:
+                                    pass
+                            if new_fc:
+                                for kp in old_fc.keyframe_points:
+                                    nkp = new_fc.keyframe_points.insert(kp.co.x, kp.co.y, options={'FAST'})
+                                    nkp.handle_left = kp.handle_left
+                                    nkp.handle_right = kp.handle_right
+                                    nkp.handle_left_type = kp.handle_left_type
+                                    nkp.handle_right_type = kp.handle_right_type
+                                    nkp.interpolation = kp.interpolation
+                                new_fc.update()
+                except Exception as e:
+                    print(f"Failed migrating legacy curves to slotted channelbag: {e}")
         
         # Calculate keyframe bounds
         try:
@@ -747,7 +852,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
             min_frame = 1.0
             max_frame = 1.0 + action_duration
             
-            # True Delta Engine Conversion
+            # True Delta Engine Conversion: In COMBINE mode, always normalize curves to delta starting at frame 1.0
             import mathutils
             groups = {}
             for fc in fcurves:
@@ -757,7 +862,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                 
             for data_path, fcs in groups.items():
                 if "rotation_quaternion" in data_path and settings.import_blend_type in {'COMBINE', 'ADD'}:
-                    # Complex Delta Conversion for Quaternions (only if combining/adding)
+                    # Complex Delta Conversion for Quaternions (Blender NLA COMBINE evaluates base_q @ delta_q)
                     w_fc = next((f for f in fcs if f.array_index == 0), None)
                     x_fc = next((f for f in fcs if f.array_index == 1), None)
                     y_fc = next((f for f in fcs if f.array_index == 2), None)
@@ -802,7 +907,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                                 if prev_delta is not None:
                                     if delta_q.dot(prev_delta) < 0:
                                         delta_q.negate()
-                                prev_delta = delta_q.copy()
+                                    prev_delta = delta_q.copy()
                                 
                                 deltas.append((frame, delta_q))
                                 
@@ -812,7 +917,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                             y_fc.keyframe_points.clear()
                             z_fc.keyframe_points.clear()
                             
-                            # Insert clean delta keyframes
+                            # Insert clean delta keyframes starting at identity (1, 0, 0, 0)
                             for frame, delta_q in deltas:
                                 w_fc.keyframe_points.insert(frame, delta_q.w, options={'FAST'})
                                 x_fc.keyframe_points.insert(frame, delta_q.x, options={'FAST'})
@@ -825,64 +930,43 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                                     kp.handle_left_type = 'AUTO_CLAMPED'
                                     kp.handle_right_type = 'AUTO_CLAMPED'
                                 f.update()
+                elif settings.import_blend_type in {'COMBINE', 'ADD'}:
+                    if "scale" in data_path:
+                        for fc in fcs:
+                            if not fc.keyframe_points:
+                                continue
+                            fc.extrapolation = 'CONSTANT'
+                            action_start_val = fc.evaluate(1.0)
+                            if abs(action_start_val) > 0.0001:
+                                scale_ratio = 1.0 / action_start_val
+                                for kp in fc.keyframe_points:
+                                    kp.co.y *= scale_ratio
+                                    kp.handle_left.y *= scale_ratio
+                                    kp.handle_right.y *= scale_ratio
+                                    kp.handle_left_type = 'AUTO_CLAMPED'
+                                    kp.handle_right_type = 'AUTO_CLAMPED'
+                            fc.update()
+                    else:
+                        for fc in fcs:
+                            if not fc.keyframe_points:
+                                continue
+                                
+                            fc.extrapolation = 'CONSTANT'
+                            action_start_val = fc.evaluate(1.0)
+                            spatial_offset = 0.0 - action_start_val
+                            
+                            for kp in fc.keyframe_points:
+                                kp.co.y = (kp.co.y + spatial_offset)
+                                kp.handle_left.y = (kp.handle_left.y + spatial_offset)
+                                kp.handle_right.y = (kp.handle_right.y + spatial_offset)
+                                kp.handle_left_type = 'AUTO_CLAMPED'
+                                kp.handle_right_type = 'AUTO_CLAMPED'
+                                
+                            fc.update()
                 else:
+                    # REPLACE mode: leave keyframe coordinates untouched
                     for fc in fcs:
-                        if not fc.keyframe_points:
-                            continue
-                            
                         fc.extrapolation = 'CONSTANT'
-                        
-                        base_val = 0.0
-                        if "scale" in data_path:
-                            base_val = 1.0
-                        elif settings.import_blend_type == 'REPLACE':
-                            try:
-                                prop = obj.path_resolve(data_path)
-                                if hasattr(prop, '__getitem__'):
-                                    base_val = prop[fc.array_index]
-                                else:
-                                    base_val = prop
-                            except:
-                                base_val = 0.0
-                                
-                        action_start_val = fc.keyframe_points[0].co.y
-                        
-                        if settings.import_blend_type == 'ADD' and data_path.endswith("location"):
-                            action_start_val = 0.0
-                            
-                        spatial_offset = base_val - action_start_val
-                        
-                        base_scale_factor = 1.0
-                        scale_fcs = []
-                        if settings.import_blend_type in {'COMBINE', 'ADD'} and data_path.endswith("location"):
-                            scale_path = data_path.replace("location", "scale")
-                            try:
-                                scale_prop = obj.path_resolve(scale_path)
-                                if hasattr(scale_prop, '__getitem__'):
-                                    base_scale_factor = scale_prop[fc.array_index]
-                                else:
-                                    base_scale_factor = scale_prop
-                            except:
-                                pass
-                                
-                            if base_scale_factor == 0: base_scale_factor = 1.0
-                            
-                            # Find if the imported action ALSO animates scale
-                            scale_fcs = [f for f in fcurves if f.data_path == scale_path and f.array_index == fc.array_index]
-                        
-                        for kp in fc.keyframe_points:
-                            # Dynamically calculate the scale factor at this exact frame if the combine layer scales it
-                            dyn_scale_factor = base_scale_factor
-                            if scale_fcs:
-                                dyn_scale_factor *= scale_fcs[0].evaluate(kp.co.x)
-                                
-                            kp.co.y = (kp.co.y + spatial_offset) * dyn_scale_factor
-                            kp.handle_left.y = (kp.handle_left.y + spatial_offset) * dyn_scale_factor
-                            kp.handle_right.y = (kp.handle_right.y + spatial_offset) * dyn_scale_factor
-                            
-                            kp.handle_left_type = 'AUTO_CLAMPED'
-                            kp.handle_right_type = 'AUTO_CLAMPED'
-                            
                         fc.update()
         
         # Create a new layer in our UI
@@ -897,7 +981,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                 track = obj.animation_data.nla_tracks.get(layer.track_name)
                 if track and track.strips:
                     track.strips[0].blend_type = settings.import_blend_type
-                    track.strips[0].extrapolation = 'NOTHING' if settings.import_blend_type == 'REPLACE' else 'HOLD_FORWARD'
+                    track.strips[0].extrapolation = 'HOLD' if ("Base_Layer" in layer.name or "Base Layer" in layer.name) else ('NOTHING' if settings.import_blend_type == 'REPLACE' else 'HOLD_FORWARD')
         
         # Assign action
         obj = anim_core.get_active_object(context)
@@ -912,43 +996,27 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                 layer = layer_data.layers[-1]
                 track = obj.animation_data.nla_tracks.get(layer.track_name)
                 if track and track.strips:
-                    strip = track.strips[0]
-                    old_action = strip.action
+                    old_strip = track.strips[0]
+                    old_action = old_strip.action
+                    strip_name = old_strip.name
                     
-                    strip_name = strip.name
-                    
-                    import time
-                    old_track = track
-                    new_track = obj.animation_data.nla_tracks.new()
-                    new_track.name = f"{old_track.name}_imported"
-                    layer.track_name = new_track.name
+                    track.strips.remove(old_strip)
+                    if old_action:
+                        try: bpy.data.actions.remove(old_action)
+                        except: pass
                     
                     # Create the strip starting exactly at the current timeline frame
-                    curr_frame = context.scene.frame_current
-                    strip = new_track.strips.new(name=strip_name, start=int(curr_frame), action=action)
-                    
-                    old_track.name = f"DELETED_{old_track.name}_{int(time.time()*1000)}"
-                    old_track.mute = True
-                    for s in old_track.strips: s.mute = True
-                    
-                    track = new_track  # Reassign track so it gets properly renamed at the end
-                    
-                    def safe_delete():
-                        try:
-                            if old_action: bpy.data.actions.remove(old_action)
-                            if obj.animation_data and old_track.name in obj.animation_data.nla_tracks:
-                                obj.animation_data.nla_tracks.remove(old_track)
-                        except: pass
-                    bpy.app.timers.register(safe_delete, first_interval=2.0)
+                    curr_frame = import_frame
+                    strip = track.strips.new(name=strip_name, start=int(curr_frame), action=action)
+                    anim_core.bind_strip_slot(obj, strip, target_slot)
                     
                     if hasattr(strip, 'use_sync_length'):
                         strip.use_sync_length = False
-                    try:
-                        strip.action_frame_start = 1.0
-                        strip.action_frame_end = max_frame if has_keys else 100.0
-                    except: pass
+                    strip.action_frame_start = 1.0
+                    strip.action_frame_end = max_frame if has_keys else 100.0
                     strip.frame_start = curr_frame
-                    strip.frame_end = curr_frame + (max_frame - 1.0 if has_keys else 100.0)
+                    strip.scale = 1.0
+                    strip.frame_end = curr_frame + (strip.action_frame_end - strip.action_frame_start)
                     strip.scale = 1.0
                     
                     # Set zero blend-in to avoid fractional frame interpolation / backtracking / downward offsets
@@ -957,9 +1025,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                         
                     strip.blend_type = settings.import_blend_type
                     layer.blend_type = settings.import_blend_type
-                    strip.extrapolation = 'HOLD_FORWARD' if settings.import_blend_type in {'COMBINE', 'ADD'} else 'NOTHING'
-                    
-                    # (Action deletion is safely deferred via the background timer above)
+                    strip.extrapolation = 'HOLD_FORWARD' if (settings.import_blend_type in {'COMBINE', 'ADD'} and curr_frame > 1.0) else ('HOLD' if settings.import_blend_type in {'COMBINE', 'ADD'} else 'NOTHING')
                         
                 base_name = item.name
                 action_name = base_name
@@ -978,6 +1044,17 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                     
                 # Step 4: Re-enter tweak mode so the newly imported action is loaded into the Action Editor and actively keyed!
                 anim_core.invisible_tweakmode_swap(context, exit_first=False, enter_second=True)
+                if obj and obj.animation_data and hasattr(obj.animation_data, 'action_slot') and target_slot:
+                    try: obj.animation_data.action_slot = target_slot
+                    except Exception: pass
+                if obj:
+                    obj.update_tag(refresh={'OBJECT', 'DATA', 'TIME'})
+                if context.view_layer:
+                    context.view_layer.update()
+                context.scene.frame_set(int(import_frame))
+                    
+                # Ensure timeline displays strictly in frames and Graph Editor shows curves
+                anim_core.ensure_timeline_frame_display(context)
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to assign imported layer: {e}")
                 

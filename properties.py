@@ -1052,7 +1052,7 @@ class LSD_PG_Animation_Settings(bpy.types.PropertyGroup):
     upload_selection: bpy.props.EnumProperty(
         name="Upload Selection",
         items=[
-            ('LAYER', "Selected Animation Layer", "Upload the entire selected animation layer"),
+            ('LAYER', "Selected Animation Layer", "Upload the entire selected animation layer (or active action if no layers exist)"),
             ('KEYFRAMES', "Selected Keyframes", "Upload only the currently selected keyframes in the timeline editor")
         ],
         default='LAYER'
@@ -1083,7 +1083,7 @@ class LSD_PG_Animation_Settings(bpy.types.PropertyGroup):
                         for track in obj.animation_data.nla_tracks:
                             is_layer_track = False
                             if hasattr(obj, 'lsd_anim_layers_data'):
-                                is_layer_track = any(track.name in {l.track_name, l.name} for l in obj.lsd_anim_layers_data.layers)
+                                is_layer_track = any(track.name in {l.track_name, l.name} for l in obj.lsd_anim_layers_data.layers if l.name != "Base Layer")
                             is_base_track = ("Base_Layer" in track.name or "Base Layer" in track.name)
                             if is_layer_track:
                                 track.mute = True
@@ -1099,11 +1099,17 @@ class LSD_PG_Animation_Settings(bpy.types.PropertyGroup):
                                     base_action = track.strips[0].action
                                     break
                         if base_action:
-                            obj.animation_data.action = base_action
+                            try:
+                                if obj.animation_data.action != base_action:
+                                    obj.animation_data.action = base_action
+                            except Exception: pass
                         elif obj.animation_data.nla_tracks and len(obj.animation_data.nla_tracks) > 0:
                             bottom_track = obj.animation_data.nla_tracks[0]
                             if len(bottom_track.strips) > 0:
-                                obj.animation_data.action = bottom_track.strips[0].action
+                                try:
+                                    if obj.animation_data.action != bottom_track.strips[0].action:
+                                        obj.animation_data.action = bottom_track.strips[0].action
+                                except Exception: pass
                         
                         obj.update_tag(refresh={'OBJECT', 'DATA'})
                 

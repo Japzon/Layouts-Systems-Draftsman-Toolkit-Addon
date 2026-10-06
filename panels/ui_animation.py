@@ -97,14 +97,24 @@ class LSD_PT_Animation_System_Main:
             header_row.prop(settings, "library_enabled", text="", icon='TRIA_DOWN' if settings.library_enabled else 'TRIA_RIGHT', emboss=False)
             header_row.label(text="Animation Layer Library", icon='ASSET_MANAGER')
             
-            # Add custom directory selector operator
-            dir_row = header_row.row(align=True)
-            dir_row.operator("lsd.anim_library_select_dir", icon='FILE_FOLDER', text="")
-            
-            header_row.operator("lsd.anim_library_update_preview", icon='FILE_REFRESH', text="")
+            header_row.operator("lsd.anim_library_refresh", icon='FILE_REFRESH', text="")
             header_row.prop(settings, "library_enabled", text="", icon='CHECKBOX_HLT' if settings.library_enabled else 'CHECKBOX_DEHLT')
             
             if settings.library_enabled:
+                import os
+                import layouts_systems_draftsman_toolkit.anim_library as anim_lib
+                try:
+                    lib_path = anim_lib.get_library_path()
+                    folder_name = os.path.basename(os.path.normpath(lib_path)) if lib_path else "anim_library"
+                    if not folder_name:
+                        folder_name = "anim_library"
+                except Exception:
+                    folder_name = "anim_library"
+
+                folder_row = lib_box.row(align=True)
+                folder_row.operator("lsd.anim_library_select_dir", icon='FILE_FOLDER', text="")
+                folder_row.label(text=f"Current: {folder_name}")
+
                 lib_box.prop(settings, "preview_capture_interval")
                 
                 col = lib_box.column(align=True)
@@ -127,6 +137,10 @@ class LSD_PT_Animation_System_Main:
                     item = settings.library_items[settings.active_library_index]
                     
                     box = lib_box.box()
+                    hdr_row = box.row()
+                    hdr_row.label(text=f"Preview: {item.name}", icon='IMAGE_DATA')
+                    hdr_row.operator("lsd.anim_library_update_preview", icon='FILE_REFRESH', text="Update Preview")
+                    
                     row = box.row()
                     
                     import layouts_systems_draftsman_toolkit.anim_library as anim_lib
@@ -135,8 +149,9 @@ class LSD_PT_Animation_System_Main:
                         if icon_id:
                             row.template_icon(icon_value=icon_id, scale=6.0)
                         else:
-                            row.label(text="No Preview", icon='ERROR')
-                    except: pass
+                            box.label(text="No Preview Generated", icon='INFO')
+                    except Exception:
+                        pass
                 
         # --- Animation Layers Subpanel ---
         layers_box = col_main.box()

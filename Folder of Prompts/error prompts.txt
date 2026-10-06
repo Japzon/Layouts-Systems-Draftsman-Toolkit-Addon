@@ -1,0 +1,15 @@
+This is a reminder that it is mandatory to always go through the project_management.txt by reading the Category Index, then thoroughly read the relevant categories (always read mandatory categories) for the list of tasks, and update the project_management.txt file if needed. Carefully read "8. Current Session Tasks Log Here" category so you will keep in touch with the latest goals and techniques used. Absolutely please try to avoid using terminal commands as much as possible so I don't need to approve every single action., delete temporary files after it has done its purpose., 
+
+without scrapping the progress, fix the issues in this error log: 
+
+Traceback (most recent call last):
+  File "C:\Users\japzo\AppData\Roaming\Blender Foundation\Blender\5.1\scripts\addons\layouts_systems_draftsman_toolkit\operators.py", line 7122, in execute
+    anim_holder.animation_data.action = action
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: bpy_struct: attribute "action" from "AnimData" is read-only
+03:52.610  bpy.rna          | ERROR Python script error in LSD_OT_anim_keyframe_entire_pose.execute
+03:52.610  operator         | ERROR Python: Traceback (most recent call last):
+                            |   File "C:\Users\japzo\AppData\Roaming\Blender Foundation\Blender\5.1\scripts\addons\layouts_systems_draftsman_toolkit\operators.py", line 7122, in execute
+                            |     anim_holder.animation_data.action = action
+                            |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                            | AttributeError: bpy_struct: attribute "action" from "AnimData" is read-only

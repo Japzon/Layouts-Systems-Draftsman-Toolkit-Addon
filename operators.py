@@ -6976,7 +6976,10 @@ class LSD_OT_Sync_Active_Layer(bpy.types.Operator):
                 # Step 2: Now that Tweak Mode is off, we can safely sync the tracks!
                 obj = anim_core.get_active_object(context)
                 if obj and obj.animation_data:
-                    obj.animation_data.action = None  # CRITICAL: Prevent old layer action from leaking!
+                    try:
+                        obj.animation_data.action = None  # CRITICAL: Prevent old layer action from leaking!
+                    except Exception:
+                        pass
                 anim_core.execute_sync_logic(context)
                 self._state = 3
                 return {'PASS_THROUGH'}
@@ -7077,6 +7080,7 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
         return context.active_object is not None
         
     def execute(self, context):
+        from . import anim_core
         obj = context.active_object
         frame = context.scene.frame_current
         
@@ -7099,32 +7103,54 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
         kf_options = set()
         
         for target in targets:
-            anim_holder = obj
+            anim_holder = obj if (context.mode == 'POSE' and obj.type == 'ARMATURE') else target
             
-            # Ensure animation data, action and slot
+            # Ensure animation data
             if not anim_holder.animation_data:
                 anim_holder.animation_data_create()
-            if not anim_holder.animation_data.action:
+                
+            # Locate active layer and strip
+            track_strip = None
+            if hasattr(anim_holder, 'lsd_anim_layers_data') and anim_holder.lsd_anim_layers_data.layers:
+                ldata = anim_holder.lsd_anim_layers_data
+                if 0 <= ldata.active_layer_index < len(ldata.layers):
+                    al = ldata.layers[ldata.active_layer_index]
+                    for tr in anim_holder.animation_data.nla_tracks:
+                        if (tr.name == al.name or tr.name == al.track_name) and tr.strips:
+                            track_strip = tr.strips[0]
+                            break
+                            
+            if track_strip:
+                action = track_strip.action
+                try:
+                    if anim_holder.animation_data.action != action:
+                        anim_holder.animation_data.action = action
+                except Exception:
+                    pass
+            elif anim_holder.animation_data.action:
+                action = anim_holder.animation_data.action
+            else:
                 action = bpy.data.actions.new(name=anim_holder.name + "Action")
-                anim_holder.animation_data.action = action
+                try:
+                    anim_holder.animation_data.action = action
+                except Exception:
+                    pass
+
+            slot = anim_core.ensure_action_slot(anim_holder, action)
+            if slot and hasattr(anim_holder.animation_data, 'action_slot'):
+                try: anim_holder.animation_data.action_slot = slot
+                except Exception: pass
+            if track_strip:
+                anim_core.bind_strip_slot(anim_holder, track_strip, slot)
 
             # Calculate the precise float frame where Blender's native keyframer will insert
             exact_float = float(frame)
-            track_strip = None
-            orig_offset = 0.0
-            if anim_holder.animation_data and anim_holder.animation_data.action and getattr(anim_holder.animation_data, 'use_tweak_mode', False):
-                for track in anim_holder.animation_data.nla_tracks:
-                    for strip in track.strips:
-                        if strip.action == anim_holder.animation_data.action:
-                            track_strip = strip
-                            orig_offset = strip.frame_start - (strip.action_frame_start * strip.scale)
-                            exact_float = strip.action_frame_start + (frame - strip.frame_start) / strip.scale
-                            break
+            if track_strip:
+                exact_float = track_strip.action_frame_start + (frame - track_strip.frame_start) / track_strip.scale
                                 
             # Use Python API keyframing to reliably insert keyframes
             try:
                 if context.mode == 'POSE' and obj.type == 'ARMATURE':
-                    # For pose bones, data path must be resolved from the armature object: pose.bones["BoneName"].property
                     bone_path = f'pose.bones["{target.name}"]'
                     obj.keyframe_insert(data_path=f'{bone_path}.location', frame=exact_float, options=kf_options)
                     if getattr(target, "rotation_mode", "QUATERNION") == 'QUATERNION':
@@ -7160,19 +7186,24 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
                 self.report({'WARNING'}, f"Failed to natively keyframe {target.name}: {e}")
                     
             if track_strip is not None:
+                # Ensure strip bounds encompass the newly inserted keyframe without distorting scale
+                if hasattr(track_strip, 'use_sync_length'):
+                    track_strip.use_sync_length = False
+                if exact_float > track_strip.action_frame_end:
+                    track_strip.action_frame_end = exact_float
+                if exact_float < track_strip.action_frame_start:
+                    track_strip.action_frame_start = exact_float
+                track_strip.scale = 1.0
+                track_strip.frame_end = track_strip.frame_start + (track_strip.action_frame_end - track_strip.action_frame_start)
                 context.view_layer.update()
-                if getattr(track_strip, 'use_sync_length', False):
-                    expected_frame_start = (track_strip.action_frame_start * track_strip.scale) + orig_offset
-                    if abs(track_strip.frame_start - expected_frame_start) > 0.001:
-                        try: track_strip.frame_start = expected_frame_start
-                        except: pass
                     
         context.view_layer.update()
+        anim_core.ensure_timeline_frame_display(context)
         try:
             bpy.ops.lsd.calculate_onion_skin('INVOKE_DEFAULT')
         except: pass
         
-        self.report({'INFO'}, f"Keyframed selected items at frame {target_frame}")
+        self.report({'INFO'}, f"Keyframed selected items at frame {frame}")
         return {'FINISHED'}
 
 
@@ -7192,11 +7223,12 @@ class LSD_OT_Anim_Layer_Add(bpy.types.Operator):
             
         if obj and obj.animation_data:
             try:
-                obj.animation_data.action = None  # CRITICAL: Prevent old layer action from leaking!
+                obj.animation_data.action = None  # Prevent old layer action from leaking!
             except: pass
             
-        # Step 2: Now it is mathematically safe to generate new tracks!
+        # Step 2: Safe to generate new tracks
         layer_data = obj.lsd_anim_layers_data
+        scene_frame_end = max(float(context.scene.frame_end), 250.0) if context and context.scene else 250.0
         
         if len(layer_data.layers) == 0:
             if not obj.animation_data:
@@ -7209,31 +7241,42 @@ class LSD_OT_Anim_Layer_Add(bpy.types.Operator):
                 except: pass
                 anchor_frame = 1
                 
-                # CRITICAL: We MUST anchor the current pose into the Base Layer.
-                # If we don't, the Base Layer is empty, meaning it has no F-curves.
-                # When other layers are muted, Blender's evaluation engine would find no base F-curves,
-                # so it would just leave the mesh frozen in whatever pose Layer 2 left it in!
+                # Slotted Action support in Blender 4.3+ / 5.x
+                if hasattr(base_action, 'slots'):
+                    slot_name = obj.name
+                    slot = base_action.slots.get(slot_name)
+                    if not slot:
+                        try: slot = base_action.slots.new(name=slot_name, id_type=getattr(obj, 'id_type', 'OBJECT'))
+                        except Exception:
+                            try: slot = base_action.slots.new(name=slot_name)
+                            except Exception: pass
+                    if slot:
+                        try: obj.animation_data.action_slot = slot
+                        except Exception: pass
+
+                # Anchor the rest/current pose into the Base Layer
                 try:
-                    obj.keyframe_insert(data_path="location", frame=1)
-                    if obj.rotation_mode == 'QUATERNION':
-                        obj.keyframe_insert(data_path="rotation_quaternion", frame=1)
+                    obj.keyframe_insert(data_path="location", frame=anchor_frame)
+                    if getattr(obj, "rotation_mode", "QUATERNION") == 'QUATERNION':
+                        obj.keyframe_insert(data_path="rotation_quaternion", frame=anchor_frame)
                     elif obj.rotation_mode == 'AXIS_ANGLE':
-                        obj.keyframe_insert(data_path="rotation_axis_angle", frame=1)
+                        obj.keyframe_insert(data_path="rotation_axis_angle", frame=anchor_frame)
                     else:
-                        obj.keyframe_insert(data_path="rotation_euler", frame=1)
-                    obj.keyframe_insert(data_path="scale", frame=1)
+                        obj.keyframe_insert(data_path="rotation_euler", frame=anchor_frame)
+                    obj.keyframe_insert(data_path="scale", frame=anchor_frame)
                     if obj.type == 'ARMATURE' and obj.pose:
                         for pbone in obj.pose.bones:
-                            pbone.keyframe_insert(data_path="location", frame=1)
-                            if pbone.rotation_mode == 'QUATERNION':
-                                pbone.keyframe_insert(data_path="rotation_quaternion", frame=1)
+                            bone_path = f'pose.bones["{pbone.name}"]'
+                            obj.keyframe_insert(data_path=f'{bone_path}.location', frame=anchor_frame)
+                            if getattr(pbone, "rotation_mode", "QUATERNION") == 'QUATERNION':
+                                obj.keyframe_insert(data_path=f'{bone_path}.rotation_quaternion', frame=anchor_frame)
                             elif pbone.rotation_mode == 'AXIS_ANGLE':
-                                pbone.keyframe_insert(data_path="rotation_axis_angle", frame=1)
+                                obj.keyframe_insert(data_path=f'{bone_path}.rotation_axis_angle', frame=anchor_frame)
                             else:
-                                pbone.keyframe_insert(data_path="rotation_euler", frame=1)
-                            pbone.keyframe_insert(data_path="scale", frame=1)
-                except:
-                    pass
+                                obj.keyframe_insert(data_path=f'{bone_path}.rotation_euler', frame=anchor_frame)
+                            obj.keyframe_insert(data_path=f'{bone_path}.scale', frame=anchor_frame)
+                except Exception as e:
+                    print(f"Error anchoring base pose: {e}")
             else:
                 base_action = obj.animation_data.action
                 if getattr(base_action, 'fcurves', None):
@@ -7258,13 +7301,16 @@ class LSD_OT_Anim_Layer_Add(bpy.types.Operator):
             base_strip.extrapolation = 'HOLD'
             if hasattr(base_strip, 'use_sync_length'):
                 base_strip.use_sync_length = False
-            try:
-                base_strip.action_frame_start = -100000
-                base_strip.action_frame_end = 100000
-            except: pass
-            base_strip.frame_start = -100000
-            base_strip.frame_end = 100000
+            base_strip.action_frame_start = float(anchor_frame)
+            if hasattr(base_action, 'frame_range') and base_action.frame_range[1] > base_action.frame_range[0]:
+                base_strip.action_frame_end = float(base_action.frame_range[1])
+                base_strip.frame_end = float(anchor_frame) + (base_strip.action_frame_end - float(base_action.frame_range[0]))
+            else:
+                base_strip.action_frame_end = scene_frame_end
+                base_strip.frame_end = scene_frame_end
+            base_strip.frame_start = float(anchor_frame)
             base_strip.scale = 1.0
+            anim_core.bind_strip_slot(obj, base_strip)
         
         layer = layer_data.layers.add()
         
@@ -7279,20 +7325,24 @@ class LSD_OT_Anim_Layer_Add(bpy.types.Operator):
             layer.track_name = track.name
             
             new_action = bpy.data.actions.new(name=f"{obj.name}_{layer.name}")
+            slot = anim_core.ensure_action_slot(obj, new_action)
+            if slot and hasattr(obj.animation_data, 'action_slot'):
+                try: obj.animation_data.action_slot = slot
+                except Exception: pass
+                    
             strip = track.strips.new(name=layer.name, start=1, action=new_action)
             strip.blend_type = 'COMBINE'
-            strip.extrapolation = 'HOLD_FORWARD'
+            strip.extrapolation = 'HOLD'
             if hasattr(strip, 'use_sync_length'):
-                strip.use_sync_length = True
-            try:
-                strip.action_frame_start = -100000
-                strip.action_frame_end = 100000
-            except: pass
+                strip.use_sync_length = False
+            strip.action_frame_start = 1.0
+            strip.action_frame_end = scene_frame_end
+            strip.frame_start = 1.0
+            strip.frame_end = scene_frame_end
             strip.scale = 1.0
-            
-            # Removed default 5-frame blend to prevent single-keyframe influence suppression
             strip.blend_in = 0.0
             strip.blend_out = 0.0
+            anim_core.bind_strip_slot(obj, strip, slot)
                 
         layer_data.active_layer_index = len(layer_data.layers) - 1
         
@@ -7307,26 +7357,30 @@ class LSD_OT_Anim_Layer_Remove(bpy.types.Operator):
     bl_label = "Remove Animation Layer"
     bl_description = "Delete the active Animation Layer from the timeline stack"
     def execute(self, context):
-        settings = context.scene.lsd_anim_settings
-        if settings.active_layer_index >= 0 and settings.active_layer_index < len(settings.layers):
-            layer = settings.layers[settings.active_layer_index]
+        from . import anim_core
+        obj = anim_core.get_active_object(context)
+        if not obj or not hasattr(obj, 'lsd_anim_layers_data'):
+            return {'CANCELLED'}
+        layer_data = obj.lsd_anim_layers_data
+        
+        if layer_data.active_layer_index >= 0 and layer_data.active_layer_index < len(layer_data.layers):
+            layer = layer_data.layers[layer_data.active_layer_index]
             
             # Step 1: Safely exit tweak mode before modifying tracks
             try:
-                from . import anim_core
                 anim_core.invisible_tweakmode_swap(context, exit_first=True, enter_second=False)
             except: pass
             
             # Step 2: Remove the physical NLA Track and its Action
-            obj = context.active_object
             if obj and obj.animation_data:
-                # Forcefully clear active action to prevent dangling pointers
                 if obj.animation_data.action:
-                    obj.animation_data.action = None
+                    try:
+                        obj.animation_data.action = None
+                    except Exception:
+                        pass
                     
                 track = obj.animation_data.nla_tracks.get(layer.track_name)
                 if track:
-                    # CRITICAL: Clear all pointers before deletion to prevent Blender EXCEPTION_ACCESS_VIOLATION crashes!
                     if obj.animation_data.nla_tracks.active == track:
                         obj.animation_data.nla_tracks.active = None
                     track.select = False
@@ -7360,10 +7414,13 @@ class LSD_OT_Anim_Layer_Remove(bpy.types.Operator):
                 context.view_layer.update()
             
             # Step 3: Remove from UI list
-            settings.layers.remove(settings.active_layer_index)
-            settings.active_layer_index = max(0, settings.active_layer_index - 1)
+            layer_data.layers.remove(layer_data.active_layer_index)
+            layer_data.active_layer_index = max(0, layer_data.active_layer_index - 1)
             
-            # Tweak mode will naturally resume on the new active layer via the property update callback
+            # Re-sync active layer
+            try:
+                anim_core.update_active_layer(context.scene.lsd_anim_settings, context)
+            except: pass
         return {'FINISHED'}
 
 class LSD_OT_Anim_Layer_Move(bpy.types.Operator):
@@ -7371,14 +7428,21 @@ class LSD_OT_Anim_Layer_Move(bpy.types.Operator):
     bl_label = "Move Animation Layer"
     direction: bpy.props.EnumProperty(items=[('UP', "Up", ""), ('DOWN', "Down", "")])
     def execute(self, context):
-        settings = context.scene.lsd_anim_settings
-        idx = settings.active_layer_index
+        from . import anim_core
+        obj = anim_core.get_active_object(context)
+        if not obj or not hasattr(obj, 'lsd_anim_layers_data'):
+            return {'CANCELLED'}
+        layer_data = obj.lsd_anim_layers_data
+        idx = layer_data.active_layer_index
         if self.direction == 'UP' and idx > 0:
-            settings.layers.move(idx, idx - 1)
-            settings.active_layer_index -= 1
-        elif self.direction == 'DOWN' and idx < len(settings.layers) - 1:
-            settings.layers.move(idx, idx + 1)
-            settings.active_layer_index += 1
+            layer_data.layers.move(idx, idx - 1)
+            layer_data.active_layer_index -= 1
+        elif self.direction == 'DOWN' and idx < len(layer_data.layers) - 1:
+            layer_data.layers.move(idx, idx + 1)
+            layer_data.active_layer_index += 1
+        try:
+            anim_core.update_active_layer(context.scene.lsd_anim_settings, context)
+        except: pass
         return {'FINISHED'}
 
 class LSD_OT_Anim_Merge_Bake(bpy.types.Operator):
@@ -8227,17 +8291,8 @@ class LSD_OT_SnapToKeyframe(bpy.types.Operator):
                             break
                             
             # Fallback robust extraction
-            fcurves_list = []
-            if hasattr(obj.animation_data.action, "fcurves"):
-                fcurves_list = obj.animation_data.action.fcurves
-            elif hasattr(obj.animation_data, "action_slot"):
-                try:
-                    from bpy_extras import anim_utils
-                    cb = anim_utils.action_get_channelbag_for_slot(obj.animation_data.action, obj.animation_data.action_slot)
-                    if cb and hasattr(cb, "fcurves"):
-                        fcurves_list = cb.fcurves
-                except Exception:
-                    pass
+            import layouts_systems_draftsman_toolkit.anim_core as anim_core
+            fcurves_list = anim_core.get_action_fcurves(obj, obj.animation_data.action)
             
             for fcurve in fcurves_list:
                 length = len(fcurve.keyframe_points)
