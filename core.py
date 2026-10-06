@@ -91,6 +91,12 @@ class LSD_OT_Core_DisablePanel(bpy.types.Operator):
     def execute(self, context: bpy.types.Context) -> Set[str]:
         if hasattr(context.scene, self.prop_name):
             setattr(context.scene, self.prop_name, False)
+            if self.prop_name in {"lsd_panel_enabled_animation", "lsd_show_panel_animation"}:
+                settings = getattr(context.scene, 'lsd_anim_settings', None)
+                if settings:
+                    settings.layers_enabled = False
+                    settings.onion_skin_enabled = False
+                    settings.library_enabled = False
         return {'FINISHED'}
 class LSD_OT_Core_SnapCursorToActive(bpy.types.Operator):
     """Snap 3D cursor to the active object's origin"""

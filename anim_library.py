@@ -239,18 +239,9 @@ class LSD_OT_Anim_Library_Delete(bpy.types.Operator):
             
         return {'FINISHED'}
 
-def _render_preview_sequence(context, obj, track, action, preview_dir):
-    """Helper to render an isolated preview sequence of a single layer."""
-    original_mutes = {}
-    if obj and obj.animation_data and obj.animation_data.nla_tracks:
-        for t in obj.animation_data.nla_tracks:
-            original_mutes[t.name] = t.mute
-            if track and t.name == track.name:
-                t.mute = False
-            else:
-                t.mute = True
-                
-    # Force view layer update so the mutes immediately take effect in the viewport
+def _render_preview_sequence(context, obj, track, action, preview_dir, start_f=None, end_f=None):
+    """Helper to render the final viewport preview sequence without muting other layers."""
+    # We DO NOT mute other tracks because the user wants to see the exact composite animation as displayed in the viewport!
     context.view_layer.update()
                 
     orig_filepath = context.scene.render.filepath
@@ -270,33 +261,37 @@ def _render_preview_sequence(context, obj, track, action, preview_dir):
         context.scene.render.resolution_x = 200
         context.scene.render.resolution_y = 200
         
-        # We must rely on the actual physical keyframes, mapping them via the NLA strip offset.
-        # action.frame_range is dangerously unreliable due to internal Blender padding.
-        if action:
-            start_f = float('inf')
-            end_f = float('-inf')
-            try:
-                fcs = action.fcurves
-                if fcs:
-                    for fc in fcs:
-                        if fc.keyframe_points:
-                            start_f = min(start_f, fc.keyframe_points[0].co.x)
-                            end_f = max(end_f, fc.keyframe_points[-1].co.x)
-            except:
-                pass
-                
-            if start_f == float('inf'):
-                start_f = action.frame_range[0]
-                end_f = action.frame_range[1]
-                
-            if track and track.strips:
-                strip = track.strips[0]
-                offset = strip.frame_start - strip.action_frame_start
-                start_f += offset
-                end_f += offset
-        else:
-            start_f = context.scene.frame_start
-            end_f = context.scene.frame_end
+        # Calculate frame boundaries if not explicitly provided
+        if start_f is None or end_f is None:
+            if action:
+                s_f = float('inf')
+                e_f = float('-inf')
+                try:
+                    from . import anim_core
+                    fcs = anim_core.get_action_fcurves(obj, action)
+                    if fcs:
+                        for fc in fcs:
+                            if fc.keyframe_points:
+                                s_f = min(s_f, fc.keyframe_points[0].co.x)
+                                e_f = max(e_f, fc.keyframe_points[-1].co.x)
+                except:
+                    pass
+                    
+                if s_f == float('inf'):
+                    s_f = action.frame_range[0]
+                    e_f = action.frame_range[1]
+                    
+                if track and track.strips:
+                    strip = track.strips[0]
+                    offset = strip.frame_start - (strip.action_frame_start * strip.scale)
+                    start_f = (s_f * strip.scale) + offset
+                    end_f = (e_f * strip.scale) + offset
+                else:
+                    start_f = s_f
+                    end_f = e_f
+            else:
+                start_f = context.scene.frame_start
+                end_f = context.scene.frame_end
             
         frame_range = max(1, int(end_f - start_f))
         
@@ -305,29 +300,40 @@ def _render_preview_sequence(context, obj, track, action, preview_dir):
             settings = getattr(context.scene, 'lsd_anim_settings', None)
             interval = float(settings.preview_capture_interval) if settings else 0.5
             if interval <= 0.001:
-                interval = 0.5 # Only failsafe against true zero division
+                interval = 0.5
         except:
             interval = 0.5
             
         fps = context.scene.render.fps or 24
         if fps < 12:
-            fps = 24  # Failsafe if user accidentally set their scene FPS extremely low
+            fps = 24
         
-        step = max(1, int(interval * fps))
+        step = max(1, int(round(interval * fps)))
         
         # Absolute failsafe: Prevent Blender from rendering more than 120 PNGs total
         max_capture_frames = 120
         expected_captures = frame_range / step
-        old_step = step
         if expected_captures > max_capture_frames:
             import math
             step = max(1, math.ceil(frame_range / max_capture_frames))
             
         import json
         meta_path = os.path.join(preview_dir, "meta.json")
+        
+        meta = {}
+        try:
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+        except: pass
+        
+        meta["fps"] = fps
+        meta["frame_range"] = frame_range
+        meta["step"] = step
+        
         try:
             with open(meta_path, "w") as f:
-                json.dump({"fps": fps, "frame_range": frame_range, "step": step}, f)
+                json.dump(meta, f)
         except:
             pass
             
@@ -342,10 +348,6 @@ def _render_preview_sequence(context, obj, track, action, preview_dir):
             
         context.scene.frame_set(orig_frame)
     finally:
-        if obj and obj.animation_data and obj.animation_data.nla_tracks:
-            for t in obj.animation_data.nla_tracks:
-                if t.name in original_mutes:
-                    t.mute = original_mutes[t.name]
         context.scene.render.filepath = orig_filepath
         context.scene.render.image_settings.file_format = orig_format
         context.scene.render.resolution_x = orig_res_x
@@ -369,7 +371,13 @@ class LSD_OT_Anim_Library_Update_Preview(bpy.types.Operator):
             self.report({'ERROR'}, "No object/animation data selected")
             return {'CANCELLED'}
             
-        layer = settings.layers[settings.active_layer_index]
+        layer_data = obj.lsd_anim_layers_data
+        
+        if layer_data.active_layer_index < 0 or layer_data.active_layer_index >= len(layer_data.layers):
+            self.report({'ERROR'}, "No active layer selected")
+            return {'CANCELLED'}
+            
+        layer = layer_data.layers[layer_data.active_layer_index]
         track = obj.animation_data.nla_tracks.get(layer.track_name if layer.track_name else layer.name)
         if not track or not track.strips:
             action = obj.animation_data.action
@@ -419,6 +427,189 @@ class LSD_OT_Anim_Library_Export(bpy.types.Operator):
         else:
             action = track.strips[0].action
             
+        settings = context.scene.lsd_anim_settings
+        
+        # Determine the timeline frame range to capture from the target layer (or selection)
+        start_f = float('inf')
+        end_f = float('-inf')
+        
+        # Safely retrieve F-curves from the source action (supporting Blender 4.3+ / 5.x Slotted Actions)
+        source_fcurves = anim_core.get_action_fcurves(obj, action)
+        
+        # Calculate the physical timeline frame range from action keyframes + strip transformation
+        if getattr(settings, 'upload_selection', 'LAYER') == 'KEYFRAMES':
+            sel_frames = set()
+            try:
+                for fc in source_fcurves:
+                    for kp in fc.keyframe_points:
+                        if kp.select_control_point:
+                            sel_frames.add(kp.co.x)
+            except: pass
+            
+            if sel_frames:
+                s_action_f = min(sel_frames)
+                e_action_f = max(sel_frames)
+                if track and track.strips:
+                    strip = track.strips[0]
+                    offset = strip.frame_start - (strip.action_frame_start * strip.scale)
+                    start_f = int(round((s_action_f * strip.scale) + offset))
+                    end_f = int(round((e_action_f * strip.scale) + offset))
+                else:
+                    start_f = int(round(s_action_f))
+                    end_f = int(round(e_action_f))
+            else:
+                self.report({'WARNING'}, "No keyframes selected in timeline. Exporting entire layer range.")
+                
+        if start_f == float('inf'):
+            try:
+                for fc in source_fcurves:
+                    if fc.keyframe_points:
+                        start_f = min(start_f, fc.keyframe_points[0].co.x)
+                        end_f = max(end_f, fc.keyframe_points[-1].co.x)
+            except: pass
+            
+            if start_f == float('inf'):
+                start_f = context.scene.frame_start
+                end_f = context.scene.frame_end
+            else:
+                if track and track.strips:
+                    strip = track.strips[0]
+                    offset = strip.frame_start - (strip.action_frame_start * strip.scale)
+                    start_f = int(round((start_f * strip.scale) + offset))
+                    end_f = int(round((end_f * strip.scale) + offset))
+                else:
+                    start_f = int(round(start_f))
+                    end_f = int(round(end_f))
+                    
+        if end_f < start_f:
+            end_f = start_f
+
+        # Identify animated bones / objects referenced in this layer's action
+        animated_bones = set()
+        animated_object_paths = set()
+        for fc in source_fcurves:
+            if fc.data_path.startswith('pose.bones["'):
+                bone_name = fc.data_path.split('pose.bones["')[1].split('"]')[0]
+                animated_bones.add(bone_name)
+            else:
+                animated_object_paths.add(fc.data_path)
+
+        # Bake capture the evaluated composite transforms strictly from start_f to end_f
+        orig_current_frame = context.scene.frame_current
+        baked_action = bpy.data.actions.new(name=f"{layer.name}_BakeCapture")
+        
+        # Helper to get or create an F-curve on baked_action regardless of Blender version (legacy vs Slotted Actions)
+        def _get_or_create_fc(act, target_obj, data_path, index):
+            # Try legacy root fcurves first if available
+            if hasattr(act, "fcurves") and not hasattr(act, "slots"):
+                fc = act.fcurves.find(data_path, index=index)
+                if not fc:
+                    fc = act.fcurves.new(data_path, index=index)
+                return fc
+            elif hasattr(act, "slots"):
+                try:
+                    slot_name = target_obj.id_data.name if hasattr(target_obj, 'id_data') else target_obj.name
+                    slot = act.slots.get(slot_name)
+                    if not slot:
+                        slot = act.slots.new(name=slot_name)
+                        
+                    from bpy_extras import anim_utils
+                    cb = anim_utils.action_get_channelbag_for_slot(act, slot)
+                    if cb is None:
+                        # Ensure channelbag exists for this slot
+                        try:
+                            cb = act.layers[0].channelbags.new(slot=slot)
+                        except Exception:
+                            cb = anim_utils.action_get_channelbag_for_slot(act, slot)
+                            
+                    if cb and hasattr(cb, "fcurves"):
+                        fc = cb.fcurves.find(data_path, index=index)
+                        if not fc:
+                            fc = cb.fcurves.new(data_path, index=index)
+                        return fc
+                except Exception as e:
+                    print(f"Error creating slotted fcurve for {data_path}[{index}]: {e}")
+                    
+            # Fallback if slots failed or fcurves is direct
+            if hasattr(act, "fcurves"):
+                fc = act.fcurves.find(data_path, index=index)
+                if not fc:
+                    fc = act.fcurves.new(data_path, index=index)
+                return fc
+            return None
+
+        # Determine bake channels per animated target
+        try:
+            for f in range(start_f, end_f + 1):
+                context.scene.frame_set(f)
+                context.view_layer.update()
+                
+                # Relative frame index in the new action (starts at frame 1)
+                action_frame = float(f - start_f + 1)
+                
+                if obj.type == 'ARMATURE' and animated_bones and obj.pose:
+                    for bname in animated_bones:
+                        pbone = obj.pose.bones.get(bname)
+                        if not pbone: continue
+                        
+                        bone_prefix = f'pose.bones["{bname}"]'
+                        
+                        # Bake location
+                        for idx, val in enumerate(pbone.location):
+                            fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.location", idx)
+                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                            
+                        # Bake rotation
+                        rot_mode = getattr(pbone, "rotation_mode", "QUATERNION")
+                        if rot_mode == 'QUATERNION':
+                            for idx, val in enumerate(pbone.rotation_quaternion):
+                                fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.rotation_quaternion", idx)
+                                if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                        elif rot_mode == 'AXIS_ANGLE':
+                            for idx, val in enumerate(pbone.rotation_axis_angle):
+                                fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.rotation_axis_angle", idx)
+                                if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                        else:
+                            for idx, val in enumerate(pbone.rotation_euler):
+                                fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.rotation_euler", idx)
+                                if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                                
+                        # Bake scale
+                        for idx, val in enumerate(pbone.scale):
+                            fc = _get_or_create_fc(baked_action, obj, f"{bone_prefix}.scale", idx)
+                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                else:
+                    # Object level transforms
+                    for idx, val in enumerate(obj.location):
+                        fc = _get_or_create_fc(baked_action, obj, "location", idx)
+                        if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                        
+                    rot_mode = getattr(obj, "rotation_mode", "QUATERNION")
+                    if rot_mode == 'QUATERNION':
+                        for idx, val in enumerate(obj.rotation_quaternion):
+                            fc = _get_or_create_fc(baked_action, obj, "rotation_quaternion", idx)
+                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                    elif rot_mode == 'AXIS_ANGLE':
+                        for idx, val in enumerate(obj.rotation_axis_angle):
+                            fc = _get_or_create_fc(baked_action, obj, "rotation_axis_angle", idx)
+                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                    else:
+                        for idx, val in enumerate(obj.rotation_euler):
+                            fc = _get_or_create_fc(baked_action, obj, "rotation_euler", idx)
+                            if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                            
+                    for idx, val in enumerate(obj.scale):
+                        fc = _get_or_create_fc(baked_action, obj, "scale", idx)
+                        if fc: fc.keyframe_points.insert(action_frame, val, options={'FAST'})
+                        
+            for fc in anim_core.get_action_fcurves(obj, baked_action):
+                fc.update()
+        finally:
+            context.scene.frame_set(orig_current_frame)
+            
+        export_action = baked_action
+        export_action.use_fake_user = True
+                
         lib_path = get_library_path()
         base_name = layer.name
         out_filepath = os.path.join(lib_path, f"{base_name}.blend")
@@ -429,20 +620,32 @@ class LSD_OT_Anim_Library_Export(bpy.types.Operator):
             counter += 1
             
         layer.name = base_name
+        export_action.name = base_name
         
-        # Save action to blend file
-        bpy.data.libraries.write(out_filepath, {action}, fake_user=True)
+        # Save action to blend file with fake_user=True
+        bpy.data.libraries.write(out_filepath, {export_action}, fake_user=True)
         
-        # Now render preview images using OpenGL Viewport render
+        # Render preview images using OpenGL Viewport render of the full composite viewport
         preview_dir = get_preview_dir(layer.name)
-        _render_preview_sequence(context, obj, track, action, preview_dir)
+        _render_preview_sequence(context, obj, track, action, preview_dir, start_f=start_f, end_f=end_f)
         
-        # Save metadata
+        # Save metadata without erasing fps/frame_range/step
         import json
         meta_filepath = os.path.join(preview_dir, "meta.json")
+        
+        meta = {}
+        try:
+            if os.path.exists(meta_filepath):
+                with open(meta_filepath, 'r') as f:
+                    meta = json.load(f)
+        except: pass
+        
+        meta["target_type"] = obj.type
+        meta["target_name"] = obj.name
+        
         try:
             with open(meta_filepath, 'w') as f:
-                json.dump({"target_type": obj.type, "target_name": obj.name}, f)
+                json.dump(meta, f)
         except Exception as e:
             print(f"Failed to save metadata for library item: {e}")
             
@@ -511,11 +714,12 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
         # Calculate keyframe bounds
         try:
             from . import anim_core
-            fcurves = anim_core.get_action_fcurves(None, action)
+            fcurves = anim_core.get_action_fcurves(obj, action)
         except Exception:
             fcurves = []
             
         min_frame = float('inf')
+        max_frame = float('-inf')
         has_keys = False
         if fcurves:
             for fc in fcurves:
@@ -524,11 +728,24 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                     for kp in fc.keyframe_points:
                         if kp.co.x < min_frame:
                             min_frame = kp.co.x
+                        if kp.co.x > max_frame:
+                            max_frame = kp.co.x
                             
-        # Calculate required NLA time offset
-        offset = 0
         if has_keys:
-            offset = context.scene.frame_current - min_frame
+            # Shift all keyframes in the imported action so the animation starts at frame 1.0
+            time_shift = 1.0 - min_frame
+            if abs(time_shift) > 0.0001:
+                for fc in fcurves:
+                    for kp in fc.keyframe_points:
+                        kp.co.x += time_shift
+                        kp.handle_left.x += time_shift
+                        kp.handle_right.x += time_shift
+                    fc.update()
+            
+            # Action duration
+            action_duration = max(1.0, max_frame - min_frame)
+            min_frame = 1.0
+            max_frame = 1.0 + action_duration
             
             # True Delta Engine Conversion
             import mathutils
@@ -570,6 +787,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                             
                             # Store evaluated deltas to avoid duplicate keyframe conflicts
                             deltas = []
+                            prev_delta = None
                             for frame in sorted(frames):
                                 curr_w = w_fc.evaluate(frame)
                                 curr_x = x_fc.evaluate(frame)
@@ -579,6 +797,13 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                                 
                                 # True 4D Delta calculation (Blender NLA Combine is base @ delta)
                                 delta_q = base_q_inv @ curr_q
+                                
+                                # Ensure continuous hemisphere to prevent 180-degree flip/backtracking
+                                if prev_delta is not None:
+                                    if delta_q.dot(prev_delta) < 0:
+                                        delta_q.negate()
+                                prev_delta = delta_q.copy()
+                                
                                 deltas.append((frame, delta_q))
                                 
                             # Clear old absolute keyframes to prevent Blender interpolation crashes
@@ -600,26 +825,26 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                                     kp.handle_left_type = 'AUTO_CLAMPED'
                                     kp.handle_right_type = 'AUTO_CLAMPED'
                                 f.update()
-                                
-                elif "scale" in data_path:
-                    base_val = 1.0
                 else:
-                    base_val = 0.0
-                    
-                if settings.import_blend_type == 'REPLACE':
-                    try:
-                        prop = obj.path_resolve(data_path)
-                        if hasattr(prop, '__getitem__'):
-                            base_val = prop[fcs[0].array_index]
-                        else:
-                            base_val = prop
-                    except: pass
-                    
-                if fcs:
                     for fc in fcs:
                         if not fc.keyframe_points:
                             continue
                             
+                        fc.extrapolation = 'CONSTANT'
+                        
+                        base_val = 0.0
+                        if "scale" in data_path:
+                            base_val = 1.0
+                        elif settings.import_blend_type == 'REPLACE':
+                            try:
+                                prop = obj.path_resolve(data_path)
+                                if hasattr(prop, '__getitem__'):
+                                    base_val = prop[fc.array_index]
+                                else:
+                                    base_val = prop
+                            except:
+                                base_val = 0.0
+                                
                         action_start_val = fc.keyframe_points[0].co.y
                         
                         if settings.import_blend_type == 'ADD' and data_path.endswith("location"):
@@ -649,7 +874,6 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                             # Dynamically calculate the scale factor at this exact frame if the combine layer scales it
                             dyn_scale_factor = base_scale_factor
                             if scale_fcs:
-                                # Blend the combine layer's scale natively (COMBINE scale multiplies)
                                 dyn_scale_factor *= scale_fcs[0].evaluate(kp.co.x)
                                 
                             kp.co.y = (kp.co.y + spatial_offset) * dyn_scale_factor
@@ -692,7 +916,6 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                     old_action = strip.action
                     
                     strip_name = strip.name
-                    strip_frame_start = strip.frame_start
                     
                     import time
                     old_track = track
@@ -700,7 +923,9 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                     new_track.name = f"{old_track.name}_imported"
                     layer.track_name = new_track.name
                     
-                    strip = new_track.strips.new(name=strip_name, start=int(strip_frame_start), action=action)
+                    # Create the strip starting exactly at the current timeline frame
+                    curr_frame = context.scene.frame_current
+                    strip = new_track.strips.new(name=strip_name, start=int(curr_frame), action=action)
                     
                     old_track.name = f"DELETED_{old_track.name}_{int(time.time()*1000)}"
                     old_track.mute = True
@@ -716,26 +941,23 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                         except: pass
                     bpy.app.timers.register(safe_delete, first_interval=2.0)
                     
-                    # Forward-Infinite bounds with native NLA momentum crossfade
                     if hasattr(strip, 'use_sync_length'):
                         strip.use_sync_length = False
                     try:
-                        strip.action_frame_start = min_frame if has_keys else 1
-                        strip.action_frame_end = 100000
+                        strip.action_frame_start = 1.0
+                        strip.action_frame_end = max_frame if has_keys else 100.0
                     except: pass
-                    strip.frame_start = context.scene.frame_current
-                    strip.frame_end = context.scene.frame_current + (100000 - (min_frame if has_keys else 1))
+                    strip.frame_start = curr_frame
+                    strip.frame_end = curr_frame + (max_frame - 1.0 if has_keys else 100.0)
                     strip.scale = 1.0
                     
-                    # Conditional blending based on import type
-                    if settings.import_blend_type in {'COMBINE', 'ADD'}:
-                        strip.blend_in = 8.0
-                    else:
-                        strip.blend_in = 0.0
+                    # Set zero blend-in to avoid fractional frame interpolation / backtracking / downward offsets
+                    strip.blend_in = 0.0
+                    strip.blend_out = 0.0
                         
                     strip.blend_type = settings.import_blend_type
                     layer.blend_type = settings.import_blend_type
-                    strip.extrapolation = 'NOTHING' if settings.import_blend_type == 'REPLACE' else 'HOLD_FORWARD'
+                    strip.extrapolation = 'HOLD_FORWARD' if settings.import_blend_type in {'COMBINE', 'ADD'} else 'NOTHING'
                     
                     # (Action deletion is safely deferred via the background timer above)
                         

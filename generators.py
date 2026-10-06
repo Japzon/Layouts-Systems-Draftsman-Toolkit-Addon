@@ -1076,56 +1076,215 @@ def group_dimension_master_list(context, dim_objs):
             break
     return {'FINISHED'}
 
-def apply_boolean_pro(obj: bpy.types.Object, cutter: bpy.types.Object, operation: str, transfer_normals: bool, outset: float, texture_blur: float = 0.0, bevel_weld_radius: float = 0.0):
-    if not cutter: return
+def apply_boolean_pro(
+    obj: bpy.types.Object,
+    cutter: bpy.types.Object,
+    operation: str = 'DIFFERENCE',
+    solver: str = 'MANIFOLD',
+    transfer_normals: bool = True,
+    outset: float = 0.0,
+    inset: float = 0.0,
+    weld_enabled: bool = False,
+    weld_distance: float = 0.0001,
+    materials_mode: str = 'INDEX_BASED',
+    materials_slot_index: int = 0,
+    texture_blur: float = 0.0,
+    bevel_weld_radius: float = 0.0
+):
+    if not obj or not cutter or obj == cutter:
+        return
     
+    # 1. Clean existing NM_ modifiers from obj and cutter to prevent z-fighting
+    for m in list(obj.modifiers):
+        if m.name in {"NM_Boolean", "NM_Weld", "NM_Bevel_Weld", "NM_Texture_Blur", "NM_Normal_Transfer"}:
+            obj.modifiers.remove(m)
+            
+    for m in list(cutter.modifiers):
+        if m.name in {"NM_Outset", "NM_Inset"}:
+            cutter.modifiers.remove(m)
+            
+    cutter.display_type = 'BOUNDS'
+
+    # 2. Outset Solidify on cutter
     if outset > 0.0:
         mod_solidify = cutter.modifiers.new("NM_Outset", 'SOLIDIFY')
         mod_solidify.thickness = outset
         mod_solidify.offset = 1.0
         mod_solidify.use_even_offset = True
-        
+
+    # 3. Inset Solidify on cutter (Slice mode only)
+    if operation == 'SLICE' and inset > 0.0:
+        mod_inset = cutter.modifiers.new("NM_Inset", 'SOLIDIFY')
+        mod_inset.thickness = inset
+        mod_inset.offset = -1.0
+        mod_inset.use_even_offset = True
+
+    # 4. Boolean Modifier on target object
     mod_bool = obj.modifiers.new("NM_Boolean", 'BOOLEAN')
     if operation == 'SLICE':
         mod_bool.operation = 'DIFFERENCE'
     else:
         mod_bool.operation = operation
+        
     mod_bool.object = cutter
-    mod_bool.solver = 'EXACT'
     
+    # Solver (Blender BooleanModifier supports FAST and EXACT)
+    if solver == 'FLOAT':
+        mod_bool.solver = 'FAST'
+    else:
+        try:
+            mod_bool.solver = 'MANIFOLD'
+        except (TypeError, ValueError):
+            mod_bool.solver = 'EXACT'
+
+    # Materials mode
+    if hasattr(mod_bool, 'material_mode'):
+        try:
+            mod_bool.material_mode = 'TRANSFER' if materials_mode == 'TRANSFER' else 'INDEX'
+        except Exception:
+            pass
+
+    # 5. Weld modifier
+    if weld_enabled:
+        mod_weld = obj.modifiers.new("NM_Weld", 'WELD')
+        mod_weld.merge_threshold = weld_distance
+
+    # 6. Bevel Weld
     if bevel_weld_radius > 0.0:
         mod_bevel = obj.modifiers.new("NM_Bevel_Weld", 'BEVEL')
         mod_bevel.width = bevel_weld_radius
         mod_bevel.segments = 3
         mod_bevel.limit_method = 'ANGLE'
         mod_bevel.profile = 0.5
-        
+
+    # 7. Texture Blur / Surface Smooth
     if texture_blur > 0.0:
         mod_blur = obj.modifiers.new("NM_Texture_Blur", 'SMOOTH')
         mod_blur.factor = texture_blur
         mod_blur.iterations = 5
-        
+
+    # 8. Data Transfer for Normals
     if transfer_normals:
         mod_dt = obj.modifiers.new("NM_Normal_Transfer", 'DATA_TRANSFER')
         mod_dt.object = cutter
         mod_dt.use_loop_data = True
         mod_dt.data_types_loops = {'CUSTOM_NORMAL'}
         mod_dt.loop_mapping = 'NEAREST_POLYNOR'
+        
+    obj.data.update()
+    cutter.data.update()
+
+def repair_boolean_normals(obj: bpy.types.Object):
+    """Destructively cleans and recalculates custom face and split normals on a mesh."""
+    if not obj or obj.type != 'MESH':
+        return
+    
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0001)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.to_mesh(obj.data)
+    bm.free()
+    
+    obj.data.calc_normals()
+    obj.data.update()
+
+def apply_boolean_extrude(obj: bpy.types.Object, distance: float = 0.05):
+    """Extrudes selected faces along normal in Edit Mode."""
+    if not obj or obj.type != 'MESH':
+        return
+    if bpy.context.mode != 'EDIT_MESH':
+        return
+    
+    bm = bmesh.from_edit_mesh(obj.data)
+    sel_faces = [f for f in bm.faces if f.select]
+    if sel_faces:
+        res = bmesh.ops.extrude_face_region(bm, geom=sel_faces)
+        verts = [e for e in res['geom'] if isinstance(e, bmesh.types.BMVert)]
+        for f in sel_faces:
+            normal = f.normal.copy()
+            bmesh.ops.translate(bm, vec=normal * distance, verts=verts)
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        bmesh.update_edit_mesh(obj.data)
+
+def apply_cut_groove(obj: bpy.types.Object, depth: float = 0.01, width: float = 0.005):
+    """Adds a procedural groove bevel modifier to the object."""
+    if not obj or obj.type != 'MESH':
+        return
+    mod = obj.modifiers.get("NM_Cut_Groove")
+    if not mod:
+        mod = obj.modifiers.new("NM_Cut_Groove", 'BEVEL')
+    mod.width = width
+    mod.segments = 2
+    mod.profile = 0.25
+    mod.limit_method = 'WEIGHT'
+
+def apply_boolean_trim(obj: bpy.types.Object, context: bpy.types.Context):
+    """Trims geometry by applying a planar difference boolean."""
+    if not obj or obj.type != 'MESH':
+        return
+    
+    # Create temporary cutting plane bounding box
+    mesh = bpy.data.meshes.new("NM_Trim_Plane")
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, x_segments=2, y_segments=2, size=max(obj.dimensions.x, obj.dimensions.y, 1.0) * 2.0)
+    bmesh.ops.solidify(bm, geom=bm.faces, thickness=0.01)
+    bm.to_mesh(mesh)
+    bm.free()
+    
+    plane_obj = bpy.data.objects.new("NM_Trim_Plane", mesh)
+    plane_obj.location = obj.location
+    plane_obj.rotation_euler = obj.rotation_euler
+    context.collection.objects.link(plane_obj)
+    
+    mod = obj.modifiers.new("NM_Trim_Bool", 'BOOLEAN')
+    mod.operation = 'DIFFERENCE'
+    mod.object = plane_obj
+    mod.solver = 'EXACT'
+
 def apply_surface_project(obj: bpy.types.Object, target: bpy.types.Object):
-    if not target: return
+    if not target or not obj: return
     mod_sw = obj.modifiers.new("NM_Surface_Project", 'SHRINKWRAP')
     mod_sw.target = target
     mod_sw.wrap_method = 'PROJECT'
     mod_sw.use_project_z = True
+    obj.display_type = 'BOUNDS'
+
 def apply_surface_insert(obj: bpy.types.Object, target: bpy.types.Object):
-    if not target: return
+    if not target or not obj: return
     mod_sw = obj.modifiers.new("NM_Surface_Insert", 'SHRINKWRAP')
     mod_sw.target = target
     mod_sw.wrap_method = 'PROJECT'
     mod_sw.use_project_z = True
+    obj.display_type = 'BOUNDS'
     mod_bool = target.modifiers.new("NM_Insert_Cut", 'BOOLEAN')
     mod_bool.operation = 'DIFFERENCE'
     mod_bool.object = obj
+
 def apply_weighted_normal(obj: bpy.types.Object):
+    if not obj: return
     mod = obj.modifiers.new("NM_Weighted_Normal", 'WEIGHTED_NORMAL')
     mod.keep_sharp = True
+
+def apply_smooth_normals(obj: bpy.types.Object):
+    if not obj: return
+    mod = obj.modifiers.new("NM_Smooth_Normals", 'SMOOTH')
+    mod.factor = 0.5
+    mod.iterations = 3
+
+def apply_normal_transfer(obj: bpy.types.Object, target: bpy.types.Object):
+    if not obj or not target: return
+    mod = obj.modifiers.new("NM_Normal_Transfer", 'DATA_TRANSFER')
+    mod.object = target
+    mod.use_loop_data = True
+    mod.data_types_loops = {'CUSTOM_NORMAL'}
+    mod.loop_mapping = 'NEAREST_POLYNOR'
+
+def repair_bevel_normals(obj: bpy.types.Object):
+    """Repairs bevel normal shading by enabling harden_normals on all bevel modifiers."""
+    if not obj or obj.type != 'MESH': return
+    for m in obj.modifiers:
+        if m.type == 'BEVEL':
+            m.harden_normals = True
+    obj.data.update()
+

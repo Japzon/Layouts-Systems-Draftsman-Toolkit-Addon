@@ -79,156 +79,163 @@ class LSD_PT_Animation_System_Main:
             "lsd_show_panel_animation",
             "lsd_panel_enabled_animation"
         )
-        if is_expanded:
-            col_main = box.column(align=True)
-            settings = context.scene.lsd_anim_settings
-            
-            # --- Animation Library Subpanel ---
-            if hasattr(settings, "library_items"):
-                lib_box = col_main.box()
-                header_row = lib_box.row()
-                header_row.prop(settings, "library_enabled", text="", icon='TRIA_DOWN' if settings.library_enabled else 'TRIA_RIGHT', emboss=False)
-                header_row.label(text="Animation Layer Library", icon='ASSET_MANAGER')
-                
-                # Add custom directory selector operator
-                dir_row = header_row.row(align=True)
-                dir_row.operator("lsd.anim_library_select_dir", icon='FILE_FOLDER', text="")
-                
-                header_row.operator("lsd.anim_library_update_preview", icon='FILE_REFRESH', text="")
-                header_row.prop(settings, "library_enabled", text="", icon='CHECKBOX_HLT' if settings.library_enabled else 'CHECKBOX_DEHLT')
-                
-                if settings.library_enabled:
-                    lib_box.prop(settings, "preview_capture_interval")
-                    
-                    col = lib_box.column(align=True)
-                    row = col.row()
-                    row.template_list("LSD_UL_Anim_Library", "", settings, "library_items", settings, "active_library_index", rows=4)
-                    
-                    col_btn = row.column(align=True)
+        if not is_expanded:
+            settings = getattr(context.scene, "lsd_anim_settings", None)
+            if settings and (settings.layers_enabled or settings.onion_skin_enabled or settings.library_enabled):
+                settings.layers_enabled = False
+                settings.onion_skin_enabled = False
+                settings.library_enabled = False
+            return
 
-                    col_btn.operator("lsd.anim_library_export", icon='EXPORT', text="")
-                    col_btn.operator("lsd.anim_library_import", icon='IMPORT', text="")
-                    col_btn.separator()
-                    col_btn.operator("lsd.anim_library_delete", icon='TRASH', text="")
-                    
-                    col.separator()
-                    col.prop(settings, "import_blend_type", text="Mode")
-                    col.prop(settings, "upload_selection", text="Upload Selection")
-                    
-                    # Animated Preview
-                    if len(settings.library_items) > 0 and settings.active_library_index < len(settings.library_items):
-                        item = settings.library_items[settings.active_library_index]
-                        
-                        box = lib_box.box()
-                        row = box.row()
-                        
-                        import layouts_systems_draftsman_toolkit.anim_library as anim_lib
-                        try:
-                            icon_id = anim_lib.get_animated_icon_id(item.name)
-                            if icon_id:
-                                row.template_icon(icon_value=icon_id, scale=6.0)
-                            else:
-                                row.label(text="No Preview", icon='ERROR')
-                        except: pass
-                    
-            # --- Animation Layers Subpanel ---
-            layers_box = col_main.box()
-            row = layers_box.row()
-            row.prop(settings, "layers_enabled", text="", icon='TRIA_DOWN' if settings.layers_enabled else 'TRIA_RIGHT', emboss=False)
-            row.label(text="Animation Layers", icon='SEQ_STRIP_DUPLICATE')
-            row.operator("lsd.anim_refresh_sync", text="", icon='FILE_REFRESH')
-            row.prop(settings, "layers_enabled", text="", icon='CHECKBOX_HLT' if settings.layers_enabled else 'CHECKBOX_DEHLT')
+        col_main = box.column(align=True)
+        settings = context.scene.lsd_anim_settings
             
-            if settings.layers_enabled:
-                import layouts_systems_draftsman_toolkit.anim_core as anim_core
-                obj = anim_core.get_active_object(context)
+        # --- Animation Library Subpanel ---
+        if hasattr(settings, "library_items"):
+            lib_box = col_main.box()
+            header_row = lib_box.row()
+            header_row.prop(settings, "library_enabled", text="", icon='TRIA_DOWN' if settings.library_enabled else 'TRIA_RIGHT', emboss=False)
+            header_row.label(text="Animation Layer Library", icon='ASSET_MANAGER')
+            
+            # Add custom directory selector operator
+            dir_row = header_row.row(align=True)
+            dir_row.operator("lsd.anim_library_select_dir", icon='FILE_FOLDER', text="")
+            
+            header_row.operator("lsd.anim_library_update_preview", icon='FILE_REFRESH', text="")
+            header_row.prop(settings, "library_enabled", text="", icon='CHECKBOX_HLT' if settings.library_enabled else 'CHECKBOX_DEHLT')
+            
+            if settings.library_enabled:
+                lib_box.prop(settings, "preview_capture_interval")
                 
-                col = layers_box.column(align=True)
+                col = lib_box.column(align=True)
                 row = col.row()
+                row.template_list("LSD_UL_Anim_Library", "", settings, "library_items", settings, "active_library_index", rows=4)
                 
-                if obj and hasattr(obj, 'lsd_anim_layers_data'):
-                    layer_data = obj.lsd_anim_layers_data
-                    row.template_list("LSD_UL_Animation_Layers", "", layer_data, "layers", layer_data, "active_layer_index", rows=4)
-                    
-                    col_btn = row.column(align=True)
-                    col_btn.operator("lsd.anim_layer_add", icon='ADD', text="")
-                    col_btn.operator("lsd.anim_layer_remove", icon='REMOVE', text="")
-                    col_btn.separator()
-                    col_btn.operator("lsd.anim_layer_move", icon='TRIA_UP', text="").direction = 'UP'
-                    col_btn.operator("lsd.anim_layer_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
-                    
-                    if len(layer_data.layers) > 0 and layer_data.active_layer_index >= 0 and layer_data.active_layer_index < len(layer_data.layers):
-                        layer = layer_data.layers[layer_data.active_layer_index]
-                        
-                        row = col.row(align=True)
-                        row.prop(layer, "blend_type", text="Blend")
-                else:
-                    row.label(text="Select an object to view its animation layers.", icon='INFO')
-                    
-                col.separator()
-                col.operator("lsd.anim_keyframe_entire_pose", icon='KEYINGSET')
-                
-                col.separator()
-                box = col.box()
-                box.label(text="Snap to Frame with Keyframes", icon='SNAP_ON')
-                row = box.row(align=True)
-                op_past = row.operator("lsd.snap_to_keyframe", text="Snap to Nearest Past Keyframe", icon='TRIA_LEFT')
-                op_past.direction = 'PAST'
-                op_future = row.operator("lsd.snap_to_keyframe", text="Snap to Nearest Future Keyframe", icon='TRIA_RIGHT')
-                op_future.direction = 'FUTURE'
-            
-            # --- Onion Skinning Subpanel ---
-            onion_box = col_main.box()
-            row = onion_box.row()
-            row.prop(settings, "onion_skin_enabled", text="", icon='TRIA_DOWN' if settings.onion_skin_enabled else 'TRIA_RIGHT', emboss=False)
-            row.label(text="Timeline Onion Skinning", icon='GHOST_ENABLED')
-            row.prop(settings, "onion_skin_enabled", text="", icon='CHECKBOX_HLT' if settings.onion_skin_enabled else 'CHECKBOX_DEHLT')
-            
-            if settings.onion_skin_enabled:
-                col = onion_box.column()
-                
+                col_btn = row.column(align=True)
 
-                row = col.row()
-                row.operator("lsd.calculate_onion_skin", icon='FILE_REFRESH')
-                
-                row_timer = col.row(align=True)
-                row_timer.prop(settings, "onion_skin_auto_refresh", icon='CHECKBOX_HLT' if settings.onion_skin_auto_refresh else 'CHECKBOX_DEHLT')
-                row_timer.prop(settings, "onion_skin_refresh_interval")
-                
-                col.prop(settings, "onion_skin_target", text="")
-                if settings.onion_skin_target == 'SELECTED':
-                    col.prop(settings, "onion_skin_near_count")
-                    
-                col.prop(settings, "onion_skin_display_type", text="")
-                if settings.onion_skin_display_type == 'MESH':
-                    col.prop(settings, "onion_skin_mesh_resolution", text="Mesh Onion Skin Resolution")
-                    
-                col.prop(settings, "onion_skin_fade")
-                col.prop(settings, "onion_skin_delete_outer_keyframes")
+                col_btn.operator("lsd.anim_library_export", icon='EXPORT', text="")
+                col_btn.operator("lsd.anim_library_import", icon='IMPORT', text="")
+                col_btn.separator()
+                col_btn.operator("lsd.anim_library_delete", icon='TRASH', text="")
                 
                 col.separator()
-                col.prop(settings, "onion_skin_frame_distance")
+                col.prop(settings, "import_blend_type", text="Mode")
+                col.prop(settings, "upload_selection", text="Upload Selection")
                 
-                row = col.row(align=True)
-                row.prop(settings, "onion_skin_opacity_before", text="Opacity Before")
-                row.prop(settings, "onion_skin_opacity_after", text="Opacity After")
+                # Animated Preview
+                if len(settings.library_items) > 0 and settings.active_library_index < len(settings.library_items):
+                    item = settings.library_items[settings.active_library_index]
+                    
+                    box = lib_box.box()
+                    row = box.row()
+                    
+                    import layouts_systems_draftsman_toolkit.anim_library as anim_lib
+                    try:
+                        icon_id = anim_lib.get_animated_icon_id(item.name)
+                        if icon_id:
+                            row.template_icon(icon_value=icon_id, scale=6.0)
+                        else:
+                            row.label(text="No Preview", icon='ERROR')
+                    except: pass
                 
-                row = col.row(align=True)
-                row.prop(settings, "onion_skin_count_before")
-                row.prop(settings, "onion_skin_count_after")
+        # --- Animation Layers Subpanel ---
+        layers_box = col_main.box()
+        row = layers_box.row()
+        row.prop(settings, "layers_enabled", text="", icon='TRIA_DOWN' if settings.layers_enabled else 'TRIA_RIGHT', emboss=False)
+        row.label(text="Animation Layers", icon='SEQ_STRIP_DUPLICATE')
+        row.operator("lsd.anim_refresh_sync", text="", icon='FILE_REFRESH')
+        row.prop(settings, "layers_enabled", text="", icon='CHECKBOX_HLT' if settings.layers_enabled else 'CHECKBOX_DEHLT')
+        
+        if settings.layers_enabled:
+            import layouts_systems_draftsman_toolkit.anim_core as anim_core
+            obj = anim_core.get_active_object(context)
+            
+            col = layers_box.column(align=True)
+            row = col.row()
+            
+            if obj and hasattr(obj, 'lsd_anim_layers_data'):
+                layer_data = obj.lsd_anim_layers_data
+                row.template_list("LSD_UL_Animation_Layers", "", layer_data, "layers", layer_data, "active_layer_index", rows=4)
                 
-                col.separator()
-                row = col.row(align=True)
-                row.prop(settings, "onion_skin_keyframe_filter", text="")
+                col_btn = row.column(align=True)
+                col_btn.operator("lsd.anim_layer_add", icon='ADD', text="")
+                col_btn.operator("lsd.anim_layer_remove", icon='REMOVE', text="")
+                col_btn.separator()
+                col_btn.operator("lsd.anim_layer_move", icon='TRIA_UP', text="").direction = 'UP'
+                col_btn.operator("lsd.anim_layer_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
                 
-                row = col.row(align=True)
-                row.prop(settings, "onion_skin_show_past", text="", icon='CHECKBOX_HLT' if getattr(settings, 'onion_skin_show_past', True) else 'CHECKBOX_DEHLT')
-                row.prop(settings, "onion_skin_color_past", text="")
-                row.prop(settings, "onion_skin_show_present", text="", icon='CHECKBOX_HLT' if getattr(settings, 'onion_skin_show_present', False) else 'CHECKBOX_DEHLT')
-                row.prop(settings, "onion_skin_color_present", text="")
-                row.prop(settings, "onion_skin_color_present_2", text="")
-                row.prop(settings, "onion_skin_show_future", text="", icon='CHECKBOX_HLT' if getattr(settings, 'onion_skin_show_future', True) else 'CHECKBOX_DEHLT')
-                row.prop(settings, "onion_skin_color_future", text="")
+                if len(layer_data.layers) > 0 and layer_data.active_layer_index >= 0 and layer_data.active_layer_index < len(layer_data.layers):
+                    layer = layer_data.layers[layer_data.active_layer_index]
+                    
+                    row = col.row(align=True)
+                    row.prop(layer, "blend_type", text="Blend")
+            else:
+                row.label(text="Select an object to view its animation layers.", icon='INFO')
+                
+            col.separator()
+            col.operator("lsd.anim_keyframe_entire_pose", icon='KEYINGSET')
+            
+            col.separator()
+            box = col.box()
+            box.label(text="Snap to Frame with Keyframes", icon='SNAP_ON')
+            row = box.row(align=True)
+            op_past = row.operator("lsd.snap_to_keyframe", text="Snap to Nearest Past Keyframe", icon='TRIA_LEFT')
+            op_past.direction = 'PAST'
+            op_future = row.operator("lsd.snap_to_keyframe", text="Snap to Nearest Future Keyframe", icon='TRIA_RIGHT')
+            op_future.direction = 'FUTURE'
+        
+        # --- Onion Skinning Subpanel ---
+        onion_box = col_main.box()
+        row = onion_box.row()
+        row.prop(settings, "onion_skin_enabled", text="", icon='TRIA_DOWN' if settings.onion_skin_enabled else 'TRIA_RIGHT', emboss=False)
+        row.label(text="Timeline Onion Skinning", icon='GHOST_ENABLED')
+        row.prop(settings, "onion_skin_enabled", text="", icon='CHECKBOX_HLT' if settings.onion_skin_enabled else 'CHECKBOX_DEHLT')
+        
+        if settings.onion_skin_enabled:
+            col = onion_box.column()
+            
+
+            row = col.row()
+            row.operator("lsd.calculate_onion_skin", icon='FILE_REFRESH')
+            
+            row_timer = col.row(align=True)
+            row_timer.prop(settings, "onion_skin_auto_refresh", icon='CHECKBOX_HLT' if settings.onion_skin_auto_refresh else 'CHECKBOX_DEHLT')
+            row_timer.prop(settings, "onion_skin_refresh_interval")
+            
+            col.prop(settings, "onion_skin_target", text="")
+            if settings.onion_skin_target == 'SELECTED':
+                col.prop(settings, "onion_skin_near_count")
+                
+            col.prop(settings, "onion_skin_display_type", text="")
+            if settings.onion_skin_display_type == 'MESH':
+                col.prop(settings, "onion_skin_mesh_resolution", text="Mesh Onion Skin Resolution")
+                
+            col.prop(settings, "onion_skin_fade")
+            col.prop(settings, "onion_skin_delete_outer_keyframes")
+            
+            col.separator()
+            col.prop(settings, "onion_skin_frame_distance")
+            
+            row = col.row(align=True)
+            row.prop(settings, "onion_skin_opacity_before", text="Opacity Before")
+            row.prop(settings, "onion_skin_opacity_after", text="Opacity After")
+            
+            row = col.row(align=True)
+            row.prop(settings, "onion_skin_count_before")
+            row.prop(settings, "onion_skin_count_after")
+            
+            col.separator()
+            row = col.row(align=True)
+            row.prop(settings, "onion_skin_keyframe_filter", text="")
+            
+            row = col.row(align=True)
+            row.prop(settings, "onion_skin_show_past", text="", icon='CHECKBOX_HLT' if getattr(settings, 'onion_skin_show_past', True) else 'CHECKBOX_DEHLT')
+            row.prop(settings, "onion_skin_color_past", text="")
+            row.prop(settings, "onion_skin_show_present", text="", icon='CHECKBOX_HLT' if getattr(settings, 'onion_skin_show_present', False) else 'CHECKBOX_DEHLT')
+            row.prop(settings, "onion_skin_color_present", text="")
+            row.prop(settings, "onion_skin_color_present_2", text="")
+            row.prop(settings, "onion_skin_show_future", text="", icon='CHECKBOX_HLT' if getattr(settings, 'onion_skin_show_future', True) else 'CHECKBOX_DEHLT')
+            row.prop(settings, "onion_skin_color_future", text="")
 
 CLASSES = (
     LSD_UL_Anim_Library,

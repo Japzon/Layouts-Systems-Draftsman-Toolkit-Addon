@@ -794,18 +794,47 @@ class LSD_ExportItem(bpy.types.PropertyGroup):
     """Item for the export list"""
     rig: bpy.props.PointerProperty(type=bpy.types.Object, name="Rig")
 # ------------------------------------------------------------------------
-
 def update_sdf_props(self, context):
     obj = context.active_object
     if not obj: return
+    
+    # Prevent assigning self as cutter
+    if self.target_object == obj:
+        self.target_object = None
+        return
+        
     mod_bool = obj.modifiers.get("NM_Boolean")
     if not mod_bool: return
     
-    if self.boolean_operation == 'SLICE': mod_bool.operation = 'DIFFERENCE'
-    else: mod_bool.operation = self.boolean_operation
+    # Sync cutter object
+    if self.target_object:
+        mod_bool.object = self.target_object
+        self.target_object.display_type = 'BOUNDS'
     
+    if self.boolean_operation == 'SLICE':
+        mod_bool.operation = 'DIFFERENCE'
+    else:
+        mod_bool.operation = self.boolean_operation
+    
+    # Solver mapping
+    if self.boolean_solver == 'FLOAT':
+        mod_bool.solver = 'FAST'
+    else:
+        try:
+            mod_bool.solver = 'MANIFOLD'
+        except (TypeError, ValueError):
+            mod_bool.solver = 'EXACT'
+        
+    # Material mode
+    if hasattr(mod_bool, 'material_mode'):
+        try:
+            mod_bool.material_mode = 'TRANSFER' if self.materials_mode == 'TRANSFER' else 'INDEX'
+        except Exception:
+            pass
+            
     cutter = mod_bool.object
     if cutter:
+        # Outset
         mod_outset = cutter.modifiers.get("NM_Outset")
         if self.outset_thickness > 0.0:
             if not mod_outset: mod_outset = cutter.modifiers.new("NM_Outset", 'SOLIDIFY')
@@ -814,6 +843,24 @@ def update_sdf_props(self, context):
             mod_outset.use_even_offset = True
         elif mod_outset:
             cutter.modifiers.remove(mod_outset)
+            
+        # Inset (Slice only)
+        mod_inset = cutter.modifiers.get("NM_Inset")
+        if self.boolean_operation == 'SLICE' and self.inset_thickness > 0.0:
+            if not mod_inset: mod_inset = cutter.modifiers.new("NM_Inset", 'SOLIDIFY')
+            mod_inset.thickness = self.inset_thickness
+            mod_inset.offset = -1.0
+            mod_inset.use_even_offset = True
+        elif mod_inset:
+            cutter.modifiers.remove(mod_inset)
+
+    # Weld
+    mod_weld = obj.modifiers.get("NM_Weld")
+    if self.weld_enabled:
+        if not mod_weld: mod_weld = obj.modifiers.new("NM_Weld", 'WELD')
+        mod_weld.merge_threshold = self.weld_distance
+    elif mod_weld:
+        obj.modifiers.remove(mod_weld)
             
     mod_bevel = obj.modifiers.get("NM_Bevel_Weld")
     if self.bevel_weld_radius > 0.0:
@@ -843,6 +890,8 @@ def update_sdf_props(self, context):
             mod_dt.use_loop_data = True
             mod_dt.data_types_loops = {'CUSTOM_NORMAL'}
             mod_dt.loop_mapping = 'NEAREST_POLYNOR'
+        elif mod_dt and cutter:
+            mod_dt.object = cutter
     elif mod_dt:
         obj.modifiers.remove(mod_dt)
 
@@ -850,43 +899,90 @@ class LSD_PG_SDF_Props(bpy.types.PropertyGroup):
     target_object: bpy.props.PointerProperty(
         name="Target Object",
         type=bpy.types.Object,
-        description="Target for boolean or normal transfer",
+        description="Target cutter for boolean or normal transfer",
         update=update_sdf_props
     )
     boolean_operation: bpy.props.EnumProperty(
         name="Operation",
-        items=[('UNION', "Union", ""), ('DIFFERENCE', "Difference", ""), ('INTERSECT', "Intersection", ""), ('SLICE', "Slice", "")],
+        items=[
+            ('DIFFERENCE', "Difference", "Subtract input meshes from active"),
+            ('UNION', "Union", "Combine input meshes into a single mesh"),
+            ('INTERSECT', "Intersection", "Keep only the intersecting geometry"),
+            ('SLICE', "Slice", "Combine Intersection and Difference to slice geometry")
+        ],
         default='DIFFERENCE',
         update=update_sdf_props
     )
-    transfer_normals: bpy.props.BoolProperty(
-        name="Transfer Normals",
-        description="Transfer normals from the target to hide the boolean seam",
-        default=True,
+    boolean_solver: bpy.props.EnumProperty(
+        name="Solver",
+        items=[
+            ('MANIFOLD', "Manifold", "Fastest solver, optimized for manifold meshes"),
+            ('FLOAT', "Float", "Simple solver with high performance"),
+            ('EXACT', "Exact", "Best results on coplanar faces")
+        ],
+        default='MANIFOLD',
         update=update_sdf_props
     )
     outset_thickness: bpy.props.FloatProperty(
         name="Outset",
-        description="Outset thickness",
+        description="Outset expansion thickness on cutter",
         default=0.0, min=0.0, unit='LENGTH',
+        update=update_sdf_props
+    )
+    inset_thickness: bpy.props.FloatProperty(
+        name="Inset",
+        description="Inset inward gap thickness on cutter (Slice mode only)",
+        default=0.0, min=0.0, unit='LENGTH',
+        update=update_sdf_props
+    )
+    weld_enabled: bpy.props.BoolProperty(
+        name="Merge by Distance",
+        description="Merge vertices within distance threshold",
+        default=False,
+        update=update_sdf_props
+    )
+    weld_distance: bpy.props.FloatProperty(
+        name="Distance",
+        description="Threshold distance for merge by distance",
+        default=0.0001, min=0.0, unit='LENGTH',
+        update=update_sdf_props
+    )
+    transfer_normals: bpy.props.BoolProperty(
+        name="Transfer Normals",
+        description="Transfer normals from the target to achieve seamless shading",
+        default=True,
+        update=update_sdf_props
+    )
+    materials_mode: bpy.props.EnumProperty(
+        name="Materials",
+        items=[
+            ('INDEX_BASED', "Index Based", "Match material index from source"),
+            ('SPECIFY', "Specify", "Apply a specific material index to cut faces"),
+            ('TRANSFER', "Transfer", "Transfer materials directly from boolean operands")
+        ],
+        default='INDEX_BASED',
+        update=update_sdf_props
+    )
+    materials_slot_index: bpy.props.IntProperty(
+        name="Material Slot",
+        description="Material slot index for cut faces in Specify mode",
+        default=0, min=0,
         update=update_sdf_props
     )
     texture_blur: bpy.props.FloatProperty(
         name="Texture Blur",
-        description="Blurring between the textures of the two materials",
-        default=0.1, min=0.0,
+        description="Smoothing/blurring factor on mesh surface",
+        default=0.0, min=0.0,
         update=update_sdf_props
     )
     bevel_weld_radius: bpy.props.FloatProperty(
         name="Bevel Weld Radius",
-        description="Radius of the bevel weld at the boolean intersection",
+        description="Radius of the bevel weld at boolean intersection",
         default=0.0, min=0.0, unit='LENGTH',
         update=update_sdf_props
     )
 
 #   Registration
-
-# ------------------------------------------------------------------------
 
 def update_library_item_name(self, context):
     try:
@@ -1697,6 +1793,7 @@ def register():
                     # Trigger a background re-merge to update the composite preview
                     from . import operators
                     operators.update_material_merge_trigger(self, context)
+
     def update_tex_transform(self, context):
         """Update active material mapping nodes instantly."""
         from . import core
@@ -1721,12 +1818,10 @@ def register():
     )
     def update_paint_bucket(self, context):
         """Dispatcher for paint bucket updates."""
-        # Use a timer to ensure context safety during rapid property updates (e.g. dragging color wheel)
         bpy.app.timers.register(lambda: (bpy.ops.lsd.apply_paint_bucket() and None), first_interval=0.01)
 
     def update_paint_bucket_color_override(self, context):
         """Overrides custom texture when color wheel is adjusted."""
-        # AI Editor Note: User requested that color wheel overrides texture as it's the 'latest change'.
         if self.lsd_paint_bucket_image:
              self.lsd_paint_bucket_image = None
         update_paint_bucket(self, context)
@@ -1736,13 +1831,11 @@ def register():
         description="Enable paint mode features",
         default=False
     )
-    
     bpy.types.Scene.lsd_enable_materials_selection = bpy.props.BoolProperty(
         name="Enable Materials Selection",
         description="Expand to enable materials and texture selection tools",
         default=False
     )
-    
     bpy.types.Scene.lsd_paint_tool = bpy.props.EnumProperty(
         name="Paint Tool",
         description="Select the active paint tool",
@@ -1785,6 +1878,7 @@ def register():
     )
     bpy.types.Scene.lsd_hook_placement_mode = bpy.props.BoolProperty(name="Hook Placement", default=False)
     bpy.types.Scene.lsd_dim_tracker_group_name = bpy.props.StringProperty(name="New Group Name", default="Group 1", description="Title for the next dimension group created from tracked items")
+    
     # 3. Order Properties
     prop_names = [
         "lsd_order_sdf_booleans",
@@ -1800,18 +1894,34 @@ def register():
     ]
     for i, name in enumerate(prop_names):
         setattr(bpy.types.Scene, name, bpy.props.IntProperty(name="Panel Order", default=i))
+
     # 4. Expansion Toggles
+    def update_anim_panel_visibility(self, context):
+        is_shown = getattr(self, "lsd_show_panel_animation", False)
+        is_enabled = getattr(self, "lsd_panel_enabled_animation", True)
+        if not is_shown or not is_enabled:
+            settings = getattr(self, "lsd_anim_settings", None)
+            if settings:
+                if getattr(settings, "layers_enabled", False):
+                    settings.layers_enabled = False
+                if getattr(settings, "onion_skin_enabled", False):
+                    settings.onion_skin_enabled = False
+                if getattr(settings, "library_enabled", False):
+                    settings.library_enabled = False
+
     from .config import LSD_PANEL_PROPS
     for prop in LSD_PANEL_PROPS:
         try:
             # Start with all panels ENABLED (visible in list) but COLLAPSED (closed)
             is_show_prop = "show" in prop
             default_val = False if is_show_prop else True
-            # Use setattr directly; it will overwrite if exists, or create if not.
-            # No need to delattr first as it can cause temporary 'missing property' states.
-            setattr(bpy.types.Scene, prop, bpy.props.BoolProperty(default=default_val))
+            if prop in {"lsd_show_panel_animation", "lsd_panel_enabled_animation"}:
+                setattr(bpy.types.Scene, prop, bpy.props.BoolProperty(default=default_val, update=update_anim_panel_visibility))
+            else:
+                setattr(bpy.types.Scene, prop, bpy.props.BoolProperty(default=default_val))
         except Exception as e:
             print(f"[LSD] Failed to register UI property {prop}: {e}")
+
     # 5. Smart Skin Properties
     bpy.types.Scene.lsd_pg_smart_skin_props = bpy.props.PointerProperty(type=LSD_PG_Smart_Skin_Props)
     
@@ -1919,4 +2029,3 @@ def unregister():
             bpy.utils.unregister_class(cls)
         except Exception:
             pass
-

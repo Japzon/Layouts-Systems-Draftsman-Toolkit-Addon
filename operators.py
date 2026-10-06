@@ -6387,24 +6387,34 @@ class LSD_OT_Quick_SDF_Boolean(bpy.types.Operator):
     
     def execute(self, context):
         active = context.active_object
-        selected = [o for o in context.selected_objects if o != active]
+        selected = [o for o in context.selected_objects if o != active and o.type == 'MESH']
         if not active or not selected:
+            self.report({'WARNING'}, "Please select active mesh and at least one cutter mesh")
             return {'CANCELLED'}
         cutter = selected[0]
         
-        # Prevent double triggering
-        from . import properties
-        properties._lsd_is_batch_updating = True
-        try:
-            active.lsd_pg_sdf_props.target_object = cutter
-            active.lsd_pg_sdf_props.operation = self.operation
-        finally:
-            properties._lsd_is_batch_updating = False
+        props = getattr(active, "lsd_pg_sdf_props", None)
+        if props:
+            props.target_object = cutter
+            props.boolean_operation = self.operation
             
-        cutter.display_type = 'TEXTURED'
-        
         from . import generators
-        generators.setup_sdf_booleans(active)
+        generators.apply_boolean_pro(
+            obj=active,
+            cutter=cutter,
+            operation=self.operation,
+            solver=props.boolean_solver if props else 'MANIFOLD',
+            transfer_normals=props.transfer_normals if props else True,
+            outset=props.outset_thickness if props else 0.0,
+            inset=props.inset_thickness if props else 0.0,
+            weld_enabled=props.weld_enabled if props else False,
+            weld_distance=props.weld_distance if props else 0.0001,
+            materials_mode=props.materials_mode if props else 'INDEX_BASED',
+            materials_slot_index=props.materials_slot_index if props else 0,
+            texture_blur=props.texture_blur if props else 0.0,
+            bevel_weld_radius=props.bevel_weld_radius if props else 0.0
+        )
+        self.report({'INFO'}, f"Applied Boolean ({self.operation}) with {cutter.name}")
         return {'FINISHED'}
 
 class LSD_OT_Toggle_Cutter_Visibility(bpy.types.Operator):
@@ -7089,8 +7099,7 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
         kf_options = set()
         
         for target in targets:
-            # If target is a bone, we use obj as the Action holder. If target is an Object, it holds its own Action.
-            anim_holder = obj if context.mode == 'POSE' else target
+            anim_holder = obj
             
             # Ensure animation data, action and slot
             if not anim_holder.animation_data:
@@ -7099,7 +7108,6 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
                 action = bpy.data.actions.new(name=anim_holder.name + "Action")
                 anim_holder.animation_data.action = action
 
-                        
             # Calculate the precise float frame where Blender's native keyframer will insert
             exact_float = float(frame)
             track_strip = None
@@ -7112,59 +7120,44 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
                             orig_offset = strip.frame_start - (strip.action_frame_start * strip.scale)
                             exact_float = strip.action_frame_start + (frame - strip.frame_start) / strip.scale
                             break
-                            
-            # Check if there is an existing target keyframe slightly offset by NLA float-drift
-            closest_kf = None
-            if anim_holder.animation_data and anim_holder.animation_data.action:
-                min_dist = 0.5
-                fcurves = getattr(anim_holder.animation_data.action, "fcurves", [])
-                for fc in fcurves:
-                    if hasattr(fc, "keyframe_points"):
-                        for kp in fc.keyframe_points:
-                            dist = abs(kp.co.x - exact_float)
-                            if dist < min_dist:
-                                min_dist = dist
-                                closest_kf = kp.co.x
                                 
-            # Use Python API keyframing to reliably bypass UI context constraints (Tweak Mode natively handles inverse NLA math)
+            # Use Python API keyframing to reliably insert keyframes
             try:
-                target.keyframe_insert(data_path="location", frame=exact_float, options=kf_options)
-                if getattr(target, "rotation_mode", "QUATERNION") == 'QUATERNION':
-                    target.keyframe_insert(data_path="rotation_quaternion", frame=exact_float, options=kf_options)
+                if context.mode == 'POSE' and obj.type == 'ARMATURE':
+                    # For pose bones, data path must be resolved from the armature object: pose.bones["BoneName"].property
+                    bone_path = f'pose.bones["{target.name}"]'
+                    obj.keyframe_insert(data_path=f'{bone_path}.location', frame=exact_float, options=kf_options)
+                    if getattr(target, "rotation_mode", "QUATERNION") == 'QUATERNION':
+                        obj.keyframe_insert(data_path=f'{bone_path}.rotation_quaternion', frame=exact_float, options=kf_options)
+                    elif target.rotation_mode == 'AXIS_ANGLE':
+                        obj.keyframe_insert(data_path=f'{bone_path}.rotation_axis_angle', frame=exact_float, options=kf_options)
+                    else:
+                        obj.keyframe_insert(data_path=f'{bone_path}.rotation_euler', frame=exact_float, options=kf_options)
+                    obj.keyframe_insert(data_path=f'{bone_path}.scale', frame=exact_float, options=kf_options)
+                    
+                    # Keyframe custom properties on the bone
+                    for prop in target.keys():
+                        if prop not in '_RNA_UI':
+                            try: obj.keyframe_insert(data_path=f'{bone_path}["{prop}"]', frame=exact_float, options=kf_options)
+                            except: pass
                 else:
-                    target.keyframe_insert(data_path="rotation_euler", frame=exact_float, options=kf_options)
-                target.keyframe_insert(data_path="scale", frame=exact_float, options=kf_options)
+                    # For standard objects
+                    target.keyframe_insert(data_path="location", frame=exact_float, options=kf_options)
+                    if getattr(target, "rotation_mode", "QUATERNION") == 'QUATERNION':
+                        target.keyframe_insert(data_path="rotation_quaternion", frame=exact_float, options=kf_options)
+                    elif target.rotation_mode == 'AXIS_ANGLE':
+                        target.keyframe_insert(data_path="rotation_axis_angle", frame=exact_float, options=kf_options)
+                    else:
+                        target.keyframe_insert(data_path="rotation_euler", frame=exact_float, options=kf_options)
+                    target.keyframe_insert(data_path="scale", frame=exact_float, options=kf_options)
+                    
+                    # Keyframe custom properties on the object
+                    for prop in target.keys():
+                        if prop not in '_RNA_UI':
+                            try: target.keyframe_insert(data_path=f'["{prop}"]', frame=exact_float, options=kf_options)
+                            except: pass
             except Exception as e:
-                self.report({'WARNING'}, f"Failed to natively keyframe: {e}")
-                
-            # If native keyframing caused a float-drift duplicate, merge the newly inserted keyframe down to the original!
-            if closest_kf is not None and abs(closest_kf - exact_float) > 0.001:
-                if anim_holder.animation_data and anim_holder.animation_data.action:
-                    fcurves = getattr(anim_holder.animation_data.action, "fcurves", [])
-                    for fc in fcurves:
-                        if hasattr(fc, "keyframe_points"):
-                            new_kp_idx, old_kp_idx = -1, -1
-                            for i, kp in enumerate(fc.keyframe_points):
-                                if abs(kp.co.x - exact_float) < 0.001:
-                                    new_kp_idx = i
-                                elif abs(kp.co.x - closest_kf) < 0.001:
-                                    old_kp_idx = i
-                                    
-                            if new_kp_idx != -1 and old_kp_idx != -1:
-                                # Duplicate detected: Delete the old keyframe and snap the newly generated one into its place
-                                fc.keyframe_points.remove(fc.keyframe_points[old_kp_idx])
-                                for kp in fc.keyframe_points:
-                                    if abs(kp.co.x - exact_float) < 0.001:
-                                        kp.co.x = closest_kf
-                                        break
-                                fc.update()
-            
-            # Keyframe custom properties (for facial rigs, sliders, etc.)
-            target_frame = closest_kf if closest_kf is not None else exact_float
-            for prop in target.keys():
-                if prop not in '_RNA_UI':
-                    try: target.keyframe_insert(data_path=f'["{prop}"]', frame=target_frame, options=kf_options)
-                    except: pass
+                self.report({'WARNING'}, f"Failed to natively keyframe {target.name}: {e}")
                     
             if track_strip is not None:
                 context.view_layer.update()
@@ -7453,31 +7446,6 @@ class LSD_OT_Anim_Sync_To_Action(bpy.types.Operator):
     bl_label = "Sync to Action"
     def execute(self, context): return {'FINISHED'}
 
-class LSD_OT_NM_Boolean_Pro(bpy.types.Operator):
-    bl_idname = "lsd.nm_boolean_pro"
-    bl_label = "Boolean"
-    def execute(self, context): return {'FINISHED'}
-
-class LSD_OT_NM_Surface_Project(bpy.types.Operator):
-    bl_idname = "lsd.nm_surface_project"
-    bl_label = "Surface Project"
-    def execute(self, context): return {'FINISHED'}
-
-class LSD_OT_NM_Surface_Insert(bpy.types.Operator):
-    bl_idname = "lsd.nm_surface_insert"
-    bl_label = "Surface Insert"
-    def execute(self, context): return {'FINISHED'}
-
-class LSD_OT_NM_Normal_Weighted(bpy.types.Operator):
-    bl_idname = "lsd.nm_normal_weighted"
-    bl_label = "Weighted Normals"
-    def execute(self, context): return {'FINISHED'}
-
-class LSD_OT_NM_Apply_Modifiers(bpy.types.Operator):
-    bl_idname = "lsd.nm_apply_modifiers"
-    bl_label = "Apply All Modifiers"
-    def execute(self, context): return {'FINISHED'}
-
 # --- Paint Layers Operators ---
 class LSD_OT_Paint_Layer_Add(bpy.types.Operator):
     bl_idname = "lsd.paint_layer_add"
@@ -7678,30 +7646,461 @@ class LSD_OT_Anim_Sync_To_Action(bpy.types.Operator):
     bl_label = "Sync to Action"
     def execute(self, context): return {'FINISHED'}
 
+class LSD_OT_NM_Pick_Cutter_From_Selection(bpy.types.Operator):
+    """Sets the other selected mesh object as the Cutter Object"""
+    bl_idname = "lsd.nm_pick_cutter_from_selection"
+    bl_label = "Pick Cutter from Selection"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        active = context.active_object
+        return active and active.type == 'MESH' and any(o for o in context.selected_objects if o != active and o.type == 'MESH')
+        
+    def execute(self, context):
+        active = context.active_object
+        sel = [o for o in context.selected_objects if o != active and o.type == 'MESH']
+        if not sel:
+            self.report({'WARNING'}, "No other mesh object selected")
+            return {'CANCELLED'}
+        cutter = sel[0]
+        props = getattr(active, "lsd_pg_sdf_props", None)
+        if props:
+            props.target_object = cutter
+            cutter.display_type = 'BOUNDS'
+            self.report({'INFO'}, f"Set '{cutter.name}' as cutter")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Quick_Boolean(bpy.types.Operator):
+    """Executes a direct NormalMagic Boolean operation with the selected cutter"""
+    bl_idname = "lsd.nm_quick_boolean"
+    bl_label = "Quick Boolean"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    operation: bpy.props.EnumProperty(
+        items=[
+            ('DIFFERENCE', "Difference", ""),
+            ('UNION', "Union", ""),
+            ('INTERSECT', "Intersection", ""),
+            ('SLICE', "Slice", "")
+        ],
+        default='DIFFERENCE'
+    )
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        active = context.active_object
+        props = getattr(active, "lsd_pg_sdf_props", None)
+        cutter = props.target_object if props else None
+        
+        if not cutter:
+            sel = [o for o in context.selected_objects if o != active and o.type == 'MESH']
+            if sel:
+                cutter = sel[0]
+                if props: props.target_object = cutter
+                
+        if not cutter or cutter == active:
+            self.report({'WARNING'}, "Please select a cutter object or select two mesh objects in the viewport")
+            return {'CANCELLED'}
+            
+        if props:
+            props.boolean_operation = self.operation
+            
+        from . import generators
+        generators.apply_boolean_pro(
+            obj=active,
+            cutter=cutter,
+            operation=self.operation,
+            solver=props.boolean_solver if props else 'MANIFOLD',
+            transfer_normals=props.transfer_normals if props else True,
+            outset=props.outset_thickness if props else 0.0,
+            inset=props.inset_thickness if props else 0.0,
+            weld_enabled=props.weld_enabled if props else False,
+            weld_distance=props.weld_distance if props else 0.0001,
+            materials_mode=props.materials_mode if props else 'INDEX_BASED',
+            materials_slot_index=props.materials_slot_index if props else 0,
+            texture_blur=props.texture_blur if props else 0.0,
+            bevel_weld_radius=props.bevel_weld_radius if props else 0.0
+        )
+        self.report({'INFO'}, f"Applied Boolean ({self.operation}) with {cutter.name}")
+        return {'FINISHED'}
+
 class LSD_OT_NM_Boolean_Pro(bpy.types.Operator):
+    """Apply or remove Boolean Pro modifier stack using NormalMagic workflow"""
     bl_idname = "lsd.nm_boolean_pro"
     bl_label = "Boolean"
-    def execute(self, context): return {'FINISHED'}
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        props = getattr(obj, "lsd_pg_sdf_props", None)
+        if not props:
+            self.report({'WARNING'}, "No Boolean Pro properties found")
+            return {'CANCELLED'}
+            
+        cutter = props.target_object
+        has_bool = "NM_Boolean" in obj.modifiers
+        
+        if has_bool:
+            for m in list(obj.modifiers):
+                if m.name in {"NM_Boolean", "NM_Weld", "NM_Bevel_Weld", "NM_Texture_Blur", "NM_Normal_Transfer"}:
+                    obj.modifiers.remove(m)
+            if cutter:
+                for m in list(cutter.modifiers):
+                    if m.name in {"NM_Outset", "NM_Inset"}:
+                        cutter.modifiers.remove(m)
+                cutter.display_type = 'TEXTURED'
+            self.report({'INFO'}, "Removed Boolean Pro modifiers")
+        else:
+            if not cutter:
+                sel = [o for o in context.selected_objects if o != obj and o.type == 'MESH']
+                if sel:
+                    cutter = sel[0]
+                    props.target_object = cutter
+            
+            if not cutter or cutter == obj:
+                self.report({'WARNING'}, "Please select a Cutter Object or select 2 mesh objects in the viewport")
+                return {'CANCELLED'}
+                
+            from . import generators
+            generators.apply_boolean_pro(
+                obj=obj,
+                cutter=cutter,
+                operation=props.boolean_operation,
+                solver=props.boolean_solver,
+                transfer_normals=props.transfer_normals,
+                outset=props.outset_thickness,
+                inset=props.inset_thickness,
+                weld_enabled=props.weld_enabled,
+                weld_distance=props.weld_distance,
+                materials_mode=props.materials_mode,
+                materials_slot_index=props.materials_slot_index,
+                texture_blur=props.texture_blur,
+                bevel_weld_radius=props.bevel_weld_radius
+            )
+            self.report({'INFO'}, f"Applied Boolean Pro ({props.boolean_operation}) with {cutter.name}")
+            
+        return {'FINISHED'}
 
 class LSD_OT_NM_Surface_Project(bpy.types.Operator):
+    """Project geometry and normals onto a target surface"""
     bl_idname = "lsd.nm_surface_project"
     bl_label = "Surface Project"
-    def execute(self, context): return {'FINISHED'}
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
+        
+    def execute(self, context):
+        obj = context.active_object
+        props = getattr(obj, "lsd_pg_sdf_props", None)
+        target = props.target_object if props else None
+        
+        if not target:
+            sel = [o for o in context.selected_objects if o != obj and o.type == 'MESH']
+            if sel:
+                target = sel[0]
+                if props: props.target_object = target
+                
+        has_proj = "NM_Surface_Project" in obj.modifiers
+        if has_proj:
+            mod = obj.modifiers.get("NM_Surface_Project")
+            if mod: obj.modifiers.remove(mod)
+            obj.display_type = 'TEXTURED'
+            self.report({'INFO'}, "Removed Surface Project")
+        else:
+            if not target:
+                self.report({'WARNING'}, "Please specify a Target Object")
+                return {'CANCELLED'}
+            from . import generators
+            generators.apply_surface_project(obj, target)
+            self.report({'INFO'}, "Applied Surface Project")
+        return {'FINISHED'}
 
 class LSD_OT_NM_Surface_Insert(bpy.types.Operator):
+    """Insert and blend a projected cutter mesh into target surface"""
     bl_idname = "lsd.nm_surface_insert"
     bl_label = "Surface Insert"
-    def execute(self, context): return {'FINISHED'}
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
+        
+    def execute(self, context):
+        obj = context.active_object
+        props = getattr(obj, "lsd_pg_sdf_props", None)
+        target = props.target_object if props else None
+        
+        if not target:
+            sel = [o for o in context.selected_objects if o != obj and o.type == 'MESH']
+            if sel:
+                target = sel[0]
+                if props: props.target_object = target
+                
+        has_ins = "NM_Surface_Insert" in obj.modifiers
+        if has_ins:
+            mod = obj.modifiers.get("NM_Surface_Insert")
+            if mod: obj.modifiers.remove(mod)
+            if target:
+                mod_cut = target.modifiers.get("NM_Insert_Cut")
+                if mod_cut: target.modifiers.remove(mod_cut)
+            obj.display_type = 'TEXTURED'
+            self.report({'INFO'}, "Removed Surface Insert")
+        else:
+            if not target:
+                self.report({'WARNING'}, "Please specify a Target Object")
+                return {'CANCELLED'}
+            from . import generators
+            generators.apply_surface_insert(obj, target)
+            self.report({'INFO'}, "Applied Surface Insert")
+        return {'FINISHED'}
 
 class LSD_OT_NM_Normal_Weighted(bpy.types.Operator):
+    """Adds or removes weighted normals for clean face shading"""
     bl_idname = "lsd.nm_normal_weighted"
     bl_label = "Weighted Normals"
-    def execute(self, context): return {'FINISHED'}
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        has_wn = "NM_Weighted_Normal" in obj.modifiers
+        if has_wn:
+            mod = obj.modifiers.get("NM_Weighted_Normal")
+            if mod: obj.modifiers.remove(mod)
+            self.report({'INFO'}, "Removed Weighted Normals")
+        else:
+            from . import generators
+            generators.apply_weighted_normal(obj)
+            self.report({'INFO'}, "Applied Weighted Normals")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Smooth_Normals(bpy.types.Operator):
+    """Smooths and flattens normals for toon or stylized shading"""
+    bl_idname = "lsd.nm_smooth_normals"
+    bl_label = "Smooth Normals"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        has_mod = "NM_Smooth_Normals" in obj.modifiers
+        if has_mod:
+            mod = obj.modifiers.get("NM_Smooth_Normals")
+            if mod: obj.modifiers.remove(mod)
+            self.report({'INFO'}, "Removed Smooth Normals")
+        else:
+            from . import generators
+            generators.apply_smooth_normals(obj)
+            self.report({'INFO'}, "Applied Smooth Normals")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Normal_Transfer(bpy.types.Operator):
+    """Transfers normals from target mesh to active mesh"""
+    bl_idname = "lsd.nm_normal_transfer"
+    bl_label = "Normal Transfer"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        props = getattr(obj, "lsd_pg_sdf_props", None)
+        target = props.target_object if props else None
+        
+        has_mod = "NM_Normal_Transfer" in obj.modifiers
+        if has_mod:
+            mod = obj.modifiers.get("NM_Normal_Transfer")
+            if mod: obj.modifiers.remove(mod)
+            self.report({'INFO'}, "Removed Normal Transfer")
+        else:
+            if not target:
+                self.report({'WARNING'}, "Please specify a Target Object")
+                return {'CANCELLED'}
+            from . import generators
+            generators.apply_normal_transfer(obj, target)
+            self.report({'INFO'}, "Applied Normal Transfer")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Repair_Boolean_Normals(bpy.types.Operator):
+    """Destructively recalculates and cleans custom normals on a boolean result"""
+    bl_idname = "lsd.nm_repair_boolean_normals"
+    bl_label = "Repair Boolean Normals"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        from . import generators
+        generators.repair_boolean_normals(obj)
+        self.report({'INFO'}, "Repaired boolean normals")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Repair_Bevel_Normals(bpy.types.Operator):
+    """Repairs bevel normal shading on active object"""
+    bl_idname = "lsd.nm_repair_bevel_normals"
+    bl_label = "Repair Bevel Normals"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        from . import generators
+        generators.repair_bevel_normals(obj)
+        self.report({'INFO'}, "Repaired bevel normals")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Boolean_Extrude(bpy.types.Operator):
+    """Extrudes selected faces along normal in Edit Mode"""
+    bl_idname = "lsd.nm_boolean_extrude"
+    bl_label = "Boolean Extrude"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    distance: bpy.props.FloatProperty(name="Distance", default=0.05, unit='LENGTH')
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH' and context.mode == 'EDIT_MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        from . import generators
+        generators.apply_boolean_extrude(obj, self.distance)
+        self.report({'INFO'}, "Extruded faces")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Cut_Groove(bpy.types.Operator):
+    """Adds a procedural cut groove bevel modifier"""
+    bl_idname = "lsd.nm_cut_groove"
+    bl_label = "Cut Groove"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    depth: bpy.props.FloatProperty(name="Depth", default=0.01, unit='LENGTH')
+    width: bpy.props.FloatProperty(name="Width", default=0.005, unit='LENGTH')
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        from . import generators
+        generators.apply_cut_groove(obj, self.depth, self.width)
+        self.report({'INFO'}, "Applied Cut Groove modifier")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Boolean_Trim(bpy.types.Operator):
+    """Trims geometry by applying a planar difference boolean"""
+    bl_idname = "lsd.nm_boolean_trim"
+    bl_label = "Boolean Trim"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        from . import generators
+        generators.apply_boolean_trim(obj, context)
+        self.report({'INFO'}, "Applied Boolean Trim")
+        return {'FINISHED'}
+
+class LSD_OT_NM_View_Normals(bpy.types.Operator):
+    """Toggles viewport display of face normals"""
+    bl_idname = "lsd.nm_view_normals"
+    bl_label = "View Normals"
+    
+    def execute(self, context):
+        space = context.space_data
+        if space and hasattr(space, 'overlay'):
+            space.overlay.show_face_normals = not space.overlay.show_face_normals
+            state = "ON" if space.overlay.show_face_normals else "OFF"
+            self.report({'INFO'}, f"Face normals overlay: {state}")
+        return {'FINISHED'}
+
+class LSD_OT_NM_View_Sharp(bpy.types.Operator):
+    """Toggles viewport display of sharp edges"""
+    bl_idname = "lsd.nm_view_sharp"
+    bl_label = "View Sharp"
+    
+    def execute(self, context):
+        space = context.space_data
+        if space and hasattr(space, 'overlay'):
+            space.overlay.show_edge_sharp = not space.overlay.show_edge_sharp
+            state = "ON" if space.overlay.show_edge_sharp else "OFF"
+            self.report({'INFO'}, f"Sharp edges overlay: {state}")
+        return {'FINISHED'}
+
+class LSD_OT_NM_Mark_Sharp(bpy.types.Operator):
+    """Marks selected edges as sharp in Edit Mode"""
+    bl_idname = "lsd.nm_mark_sharp"
+    bl_label = "Mark Sharp"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'EDIT_MESH'
+        
+    def execute(self, context):
+        bpy.ops.mesh.mark_sharp()
+        self.report({'INFO'}, "Marked selected edges as sharp")
+        return {'FINISHED'}
 
 class LSD_OT_NM_Apply_Modifiers(bpy.types.Operator):
+    """Applies all modifiers on the active object sequentially"""
     bl_idname = "lsd.nm_apply_modifiers"
     bl_label = "Apply All Modifiers"
-    def execute(self, context): return {'FINISHED'}
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+        
+    def execute(self, context):
+        obj = context.active_object
+        initial_mode = context.mode
+        if initial_mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+            
+        applied_count = 0
+        try:
+            for mod in list(obj.modifiers):
+                try:
+                    bpy.ops.object.modifier_apply(modifier=mod.name)
+                    applied_count += 1
+                except Exception as e:
+                    print(f"Could not apply modifier {mod.name}: {e}")
+        finally:
+            if initial_mode != 'OBJECT' and initial_mode in {'EDIT_MESH', 'EDIT'}:
+                try: bpy.ops.object.mode_set(mode='EDIT')
+                except: pass
+                
+        self.report({'INFO'}, f"Applied {applied_count} modifier(s)")
+        return {'FINISHED'}
 
 # --- Paint Layers Operators ---
 class LSD_OT_Paint_Layer_Add(bpy.types.Operator):
@@ -8005,10 +8404,22 @@ class LSD_OT_SetStartupFiles(bpy.types.Operator):
 def register():
     CLASSES = [
         LSD_OT_SetStartupFiles, LSD_OT_SelectStartupBlend, LSD_OT_SelectUserprefBlend,
+        LSD_OT_NM_Pick_Cutter_From_Selection,
+        LSD_OT_NM_Quick_Boolean,
         LSD_OT_NM_Boolean_Pro,
         LSD_OT_NM_Surface_Project,
         LSD_OT_NM_Surface_Insert,
         LSD_OT_NM_Normal_Weighted,
+        LSD_OT_NM_Smooth_Normals,
+        LSD_OT_NM_Normal_Transfer,
+        LSD_OT_NM_Repair_Boolean_Normals,
+        LSD_OT_NM_Repair_Bevel_Normals,
+        LSD_OT_NM_Boolean_Extrude,
+        LSD_OT_NM_Cut_Groove,
+        LSD_OT_NM_Boolean_Trim,
+        LSD_OT_NM_View_Normals,
+        LSD_OT_NM_View_Sharp,
+        LSD_OT_NM_Mark_Sharp,
         LSD_OT_NM_Apply_Modifiers,
 
         LSD_OT_Sync_Active_Layer,
@@ -8069,10 +8480,22 @@ def register():
 def unregister():
     CLASSES = [
         LSD_OT_SetStartupFiles, LSD_OT_SelectStartupBlend, LSD_OT_SelectUserprefBlend,
+        LSD_OT_NM_Pick_Cutter_From_Selection,
+        LSD_OT_NM_Quick_Boolean,
         LSD_OT_NM_Boolean_Pro,
         LSD_OT_NM_Surface_Project,
         LSD_OT_NM_Surface_Insert,
         LSD_OT_NM_Normal_Weighted,
+        LSD_OT_NM_Smooth_Normals,
+        LSD_OT_NM_Normal_Transfer,
+        LSD_OT_NM_Repair_Boolean_Normals,
+        LSD_OT_NM_Repair_Bevel_Normals,
+        LSD_OT_NM_Boolean_Extrude,
+        LSD_OT_NM_Cut_Groove,
+        LSD_OT_NM_Boolean_Trim,
+        LSD_OT_NM_View_Normals,
+        LSD_OT_NM_View_Sharp,
+        LSD_OT_NM_Mark_Sharp,
         LSD_OT_NM_Apply_Modifiers,
 
         LSD_OT_Sync_Active_Layer,

@@ -265,8 +265,8 @@ def build_onion_cache(context=None):
                                     strip_scale = strip.scale
                                     break
                                     
-                elif settings.layers_enabled and settings.active_layer_index >= 0 and settings.active_layer_index < len(settings.layers):
-                    layer = settings.layers[settings.active_layer_index]
+                elif settings.layers_enabled and hasattr(obj, 'lsd_anim_layers_data') and obj.lsd_anim_layers_data.active_layer_index >= 0 and obj.lsd_anim_layers_data.active_layer_index < len(obj.lsd_anim_layers_data.layers):
+                    layer = obj.lsd_anim_layers_data.layers[obj.lsd_anim_layers_data.active_layer_index]
                     track = obj.animation_data.nla_tracks.get(layer.track_name)
                     if track and track.strips:
                         active_strip = track.strips[0]
