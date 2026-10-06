@@ -7395,7 +7395,7 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
                     track_strip.action_frame_start = exact_float
                 track_strip.scale = 1.0
                 track_strip.frame_end = track_strip.frame_start + (track_strip.action_frame_end - track_strip.action_frame_start)
-                track_strip.extrapolation = 'HOLD' if is_combine_layer and track_strip.frame_start <= 1.0 else ('HOLD_FORWARD' if is_combine_layer else 'HOLD')
+                track_strip.extrapolation = 'HOLD_FORWARD' if track_strip.frame_start > 1.0 else 'HOLD'
 
             # Anti-inversion check: If active layer is not topmost and Tweak Mode is not active,
             # clear animation_data.action so NLA stack does not invert

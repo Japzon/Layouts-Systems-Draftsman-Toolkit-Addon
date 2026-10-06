@@ -367,7 +367,7 @@ def sync_layer_light(context):
                 if is_base:
                     strip.extrapolation = 'HOLD'
                 elif layer.blend_type == 'REPLACE':
-                    strip.extrapolation = 'NOTHING'
+                    strip.extrapolation = 'HOLD_FORWARD' if strip.frame_start > 1.0 else 'HOLD'
                 else:
                     strip.extrapolation = 'HOLD_FORWARD' if strip.frame_start > 1.0 else 'HOLD'
     
@@ -499,7 +499,7 @@ def execute_sync_logic(context, enter_tweak_mode=True):
                 if is_base:
                     strip.extrapolation = 'HOLD'
                 elif layer.blend_type == 'REPLACE':
-                    strip.extrapolation = 'NOTHING'
+                    strip.extrapolation = 'HOLD_FORWARD' if strip.frame_start > 1.0 else 'HOLD'
                 else:
                     strip.extrapolation = 'HOLD_FORWARD' if strip.frame_start > 1.0 else 'HOLD'
                         

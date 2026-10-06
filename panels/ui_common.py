@@ -87,13 +87,6 @@ class LSD_OT_TogglePanelVisibility(bpy.types.Operator):
         new_value = not current_value
         setattr(context.scene, self.panel_property, new_value)
 
-        # Handle animation sub-panels disable on collapse
-        if self.panel_property == "lsd_show_panel_animation" and not new_value:
-            settings = getattr(context.scene, 'lsd_anim_settings', None)
-            if settings:
-                settings.layers_enabled = False
-                settings.onion_skin_enabled = False
-                settings.library_enabled = False
 
         # Handle auto-collapse logic
         if new_value and context.scene.lsd_auto_collapse_panels:
@@ -102,12 +95,7 @@ class LSD_OT_TogglePanelVisibility(bpy.types.Operator):
                 if prop_name != self.panel_property and prop_name.startswith("lsd_show_panel_"):
                     if hasattr(context.scene, prop_name):
                         setattr(context.scene, prop_name, False)
-                        if prop_name == "lsd_show_panel_animation":
-                            settings = getattr(context.scene, 'lsd_anim_settings', None)
-                            if settings:
-                                settings.layers_enabled = False
-                                settings.onion_skin_enabled = False
-                                settings.library_enabled = False
+
         
         return {'FINISHED'}
 class LSD_OT_UpdatePanelOrder(bpy.types.Operator):

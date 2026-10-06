@@ -80,11 +80,6 @@ class LSD_PT_Animation_System_Main:
             "lsd_panel_enabled_animation"
         )
         if not is_expanded:
-            settings = getattr(context.scene, "lsd_anim_settings", None)
-            if settings and (settings.layers_enabled or settings.onion_skin_enabled or settings.library_enabled):
-                settings.layers_enabled = False
-                settings.onion_skin_enabled = False
-                settings.library_enabled = False
             return
 
         col_main = box.column(align=True)
@@ -94,13 +89,17 @@ class LSD_PT_Animation_System_Main:
         if hasattr(settings, "library_items"):
             lib_box = col_main.box()
             header_row = lib_box.row()
-            header_row.prop(settings, "library_enabled", text="", icon='TRIA_DOWN' if settings.library_enabled else 'TRIA_RIGHT', emboss=False)
+            header_row.prop(settings, "show_subpanel_library", text="", icon='TRIA_DOWN' if settings.show_subpanel_library else 'TRIA_RIGHT', emboss=False)
             header_row.label(text="Animation Layer Library", icon='ASSET_MANAGER')
             
             header_row.operator("lsd.anim_library_refresh", icon='FILE_REFRESH', text="")
             header_row.prop(settings, "library_enabled", text="", icon='CHECKBOX_HLT' if settings.library_enabled else 'CHECKBOX_DEHLT')
             
-            if settings.library_enabled:
+            if settings.show_subpanel_library:
+                col_lib = lib_box.column(align=True)
+                if not settings.library_enabled:
+                    col_lib.active = False
+                
                 import os
                 import layouts_systems_draftsman_toolkit.anim_library as anim_lib
                 try:
@@ -111,13 +110,13 @@ class LSD_PT_Animation_System_Main:
                 except Exception:
                     folder_name = "anim_library"
 
-                folder_row = lib_box.row(align=True)
+                folder_row = col_lib.row(align=True)
                 folder_row.operator("lsd.anim_library_select_dir", icon='FILE_FOLDER', text="")
                 folder_row.label(text=f"Current: {folder_name}")
 
-                lib_box.prop(settings, "preview_capture_interval")
+                col_lib.prop(settings, "preview_capture_interval")
                 
-                col = lib_box.column(align=True)
+                col = col_lib.column(align=True)
                 row = col.row()
                 row.template_list("LSD_UL_Anim_Library", "", settings, "library_items", settings, "active_library_index", rows=4)
                 
@@ -136,7 +135,7 @@ class LSD_PT_Animation_System_Main:
                 if len(settings.library_items) > 0 and settings.active_library_index < len(settings.library_items):
                     item = settings.library_items[settings.active_library_index]
                     
-                    box = lib_box.box()
+                    box = col_lib.box()
                     hdr_row = box.row()
                     hdr_row.label(text=f"Preview: {item.name}", icon='IMAGE_DATA')
                     hdr_row.operator("lsd.anim_library_update_preview", icon='FILE_REFRESH', text="Update Preview")
@@ -156,16 +155,20 @@ class LSD_PT_Animation_System_Main:
         # --- Animation Layers Subpanel ---
         layers_box = col_main.box()
         row = layers_box.row()
-        row.prop(settings, "layers_enabled", text="", icon='TRIA_DOWN' if settings.layers_enabled else 'TRIA_RIGHT', emboss=False)
+        row.prop(settings, "show_subpanel_layers", text="", icon='TRIA_DOWN' if settings.show_subpanel_layers else 'TRIA_RIGHT', emboss=False)
         row.label(text="Animation Layers", icon='SEQ_STRIP_DUPLICATE')
         row.operator("lsd.anim_refresh_sync", text="", icon='FILE_REFRESH')
         row.prop(settings, "layers_enabled", text="", icon='CHECKBOX_HLT' if settings.layers_enabled else 'CHECKBOX_DEHLT')
         
-        if settings.layers_enabled:
+        if settings.show_subpanel_layers:
+            col_layers = layers_box.column(align=True)
+            if not settings.layers_enabled:
+                col_layers.active = False
+            
             import layouts_systems_draftsman_toolkit.anim_core as anim_core
             obj = anim_core.get_active_object(context)
             
-            col = layers_box.column(align=True)
+            col = col_layers.column(align=True)
             row = col.row()
             
             if obj and hasattr(obj, 'lsd_anim_layers_data'):
@@ -202,12 +205,15 @@ class LSD_PT_Animation_System_Main:
         # --- Onion Skinning Subpanel ---
         onion_box = col_main.box()
         row = onion_box.row()
-        row.prop(settings, "onion_skin_enabled", text="", icon='TRIA_DOWN' if settings.onion_skin_enabled else 'TRIA_RIGHT', emboss=False)
+        row.prop(settings, "show_subpanel_onion_skin", text="", icon='TRIA_DOWN' if settings.show_subpanel_onion_skin else 'TRIA_RIGHT', emboss=False)
         row.label(text="Timeline Onion Skinning", icon='GHOST_ENABLED')
         row.prop(settings, "onion_skin_enabled", text="", icon='CHECKBOX_HLT' if settings.onion_skin_enabled else 'CHECKBOX_DEHLT')
         
-        if settings.onion_skin_enabled:
-            col = onion_box.column()
+        if settings.show_subpanel_onion_skin:
+            col_onion = onion_box.column()
+            if not settings.onion_skin_enabled:
+                col_onion.active = False
+            col = col_onion
             
 
             row = col.row()

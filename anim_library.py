@@ -852,6 +852,61 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
             min_frame = 1.0
             max_frame = 1.0 + action_duration
             
+            # Detect preceding layers for continuous evaluation and coordinate continuity
+            existing_layers = list(obj.lsd_anim_layers_data.layers) if (obj and hasattr(obj, 'lsd_anim_layers_data')) else []
+            preceding_combine_layer = None
+            last_combine_kf_frame = None
+            if existing_layers:
+                for lyr in reversed(existing_layers):
+                    if lyr.blend_type == 'COMBINE':
+                        preceding_combine_layer = lyr
+                        break
+
+            if preceding_combine_layer and obj and obj.animation_data:
+                comb_track = obj.animation_data.nla_tracks.get(preceding_combine_layer.track_name)
+                if comb_track and comb_track.strips:
+                    comb_strip = comb_track.strips[0]
+                    comb_act = comb_strip.action
+                    if comb_act:
+                        c_fcs = anim_core.get_action_fcurves(obj, comb_act)
+                        comb_kfs = []
+                        for c_fc in c_fcs:
+                            for kp in c_fc.keyframe_points:
+                                comb_kfs.append(comb_strip.frame_start + (kp.co.x - comb_strip.action_frame_start) * comb_strip.scale)
+                        if comb_kfs:
+                            last_combine_kf_frame = max(comb_kfs)
+                        else:
+                            last_combine_kf_frame = comb_strip.frame_end
+
+            # Ensure preceding REPLACE strip holds forward (so COMBINE layer evaluated on top does not snap/collapse)
+            preceding_replace_layer = None
+            if existing_layers:
+                for lyr in reversed(existing_layers):
+                    if lyr.blend_type == 'REPLACE':
+                        preceding_replace_layer = lyr
+                        break
+            if preceding_replace_layer and obj and obj.animation_data:
+                rep_track = obj.animation_data.nla_tracks.get(preceding_replace_layer.track_name)
+                if rep_track and rep_track.strips:
+                    rep_strip = rep_track.strips[0]
+                    rep_strip.extrapolation = 'HOLD_FORWARD' if rep_strip.frame_start > 1.0 else 'HOLD'
+
+            # Sample evaluated transforms for REPLACE mode import at current frame
+            eval_obj_loc = None
+            eval_bone_locs = {}
+            if settings.import_blend_type == 'REPLACE':
+                orig_scene_frame = context.scene.frame_current
+                try:
+                    context.scene.frame_set(int(round(import_frame)))
+                    context.view_layer.update()
+                    eval_obj_loc = obj.location.copy()
+                    if obj.type == 'ARMATURE' and obj.pose:
+                        for pb in obj.pose.bones:
+                            eval_bone_locs[pb.name] = pb.location.copy()
+                finally:
+                    context.scene.frame_set(int(round(orig_scene_frame)))
+                    context.view_layer.update()
+
             # True Delta Engine Conversion: In COMBINE mode, always normalize curves to delta starting at frame 1.0
             import mathutils
             groups = {}
@@ -964,16 +1019,48 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                                 
                             fc.update()
                 else:
-                    # REPLACE mode: leave keyframe coordinates untouched
-                    for fc in fcs:
-                        fc.extrapolation = 'CONSTANT'
-                        fc.update()
+                    # REPLACE mode: Start animation at the current object/bone location at the current frame
+                    if "location" in data_path:
+                        is_bone = "pose.bones[" in data_path
+                        bone_name = None
+                        if is_bone:
+                            try:
+                                bone_name = data_path.split('"')[1]
+                            except Exception:
+                                pass
+                        
+                        target_start_vector = None
+                        if is_bone and bone_name and bone_name in eval_bone_locs:
+                            target_start_vector = eval_bone_locs[bone_name]
+                        elif not is_bone and eval_obj_loc is not None:
+                            target_start_vector = eval_obj_loc
+                            
+                        for fc in fcs:
+                            fc.extrapolation = 'CONSTANT'
+                            if not fc.keyframe_points:
+                                continue
+                            if target_start_vector is not None and fc.array_index < len(target_start_vector):
+                                action_start_val = fc.evaluate(1.0)
+                                target_val = target_start_vector[fc.array_index]
+                                spatial_offset = target_val - action_start_val
+                                for kp in fc.keyframe_points:
+                                    kp.co.y += spatial_offset
+                                    kp.handle_left.y += spatial_offset
+                                    kp.handle_right.y += spatial_offset
+                                    kp.handle_left_type = 'AUTO_CLAMPED'
+                                    kp.handle_right_type = 'AUTO_CLAMPED'
+                            fc.update()
+                    else:
+                        for fc in fcs:
+                            fc.extrapolation = 'CONSTANT'
+                            fc.update()
         
         # Create a new layer in our UI
         bpy.ops.lsd.anim_layer_add()
         
         # Apply chosen import blend mode
         layer_data = obj.lsd_anim_layers_data
+        curr_frame = import_frame
         if layer_data.active_layer_index >= 0 and layer_data.active_layer_index < len(layer_data.layers):
             layer = layer_data.layers[layer_data.active_layer_index]
             layer.blend_type = settings.import_blend_type
@@ -981,7 +1068,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                 track = obj.animation_data.nla_tracks.get(layer.track_name)
                 if track and track.strips:
                     track.strips[0].blend_type = settings.import_blend_type
-                    track.strips[0].extrapolation = 'HOLD' if ("Base_Layer" in layer.name or "Base Layer" in layer.name) else ('NOTHING' if settings.import_blend_type == 'REPLACE' else 'HOLD_FORWARD')
+                    track.strips[0].extrapolation = 'HOLD' if ("Base_Layer" in layer.name or "Base Layer" in layer.name) else ('HOLD_FORWARD' if curr_frame > 1.0 else 'HOLD')
         
         # Assign action
         obj = anim_core.get_active_object(context)
@@ -1025,7 +1112,7 @@ class LSD_OT_Anim_Library_Import(bpy.types.Operator):
                         
                     strip.blend_type = settings.import_blend_type
                     layer.blend_type = settings.import_blend_type
-                    strip.extrapolation = 'HOLD_FORWARD' if (settings.import_blend_type in {'COMBINE', 'ADD'} and curr_frame > 1.0) else ('HOLD' if settings.import_blend_type in {'COMBINE', 'ADD'} else 'NOTHING')
+                    strip.extrapolation = 'HOLD' if ("Base_Layer" in layer.name or "Base Layer" in layer.name) else ('HOLD_FORWARD' if curr_frame > 1.0 else 'HOLD')
                         
                 base_name = item.name
                 action_name = base_name

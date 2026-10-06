@@ -91,7 +91,7 @@ class LSD_OT_Core_DisablePanel(bpy.types.Operator):
     def execute(self, context: bpy.types.Context) -> Set[str]:
         if hasattr(context.scene, self.prop_name):
             setattr(context.scene, self.prop_name, False)
-            if self.prop_name in {"lsd_panel_enabled_animation", "lsd_show_panel_animation"}:
+            if self.prop_name == "lsd_panel_enabled_animation":
                 settings = getattr(context.scene, 'lsd_anim_settings', None)
                 if settings:
                     settings.layers_enabled = False

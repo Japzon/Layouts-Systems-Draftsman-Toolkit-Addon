@@ -1,4 +1,4 @@
 This is a reminder that it is mandatory to always go through the project_management.txt by reading the Category Index, then thoroughly read the relevant categories (always read mandatory categories) for the list of tasks, and update the project_management.txt file if needed. Carefully read "8. Current Session Tasks Log Here" category so you will keep in touch with the latest goals and techniques used. Absolutely please try to avoid using terminal commands as much as possible so I don't need to approve every single action., delete temporary files after it has done its purpose., don't scrap the progress, 
 
 In the ‘Animation Layers System’ panel, 
-when this panel is disabled/collapsed, it shouldn't disable all of the layers in the non-linear animation editor.
+

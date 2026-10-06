@@ -1077,7 +1077,7 @@ class LSD_PG_Animation_Settings(bpy.types.PropertyGroup):
                 # Turn off auto-keying globally
                 context.scene.tool_settings.use_keyframe_insert_auto = False
                 
-                # Unlock and mute all layer tracks so they don't override transforms
+                # Preserve all animation layer tracks in the Non-Linear Animation (NLA) editor according to layer.is_muted
                 for obj in context.scene.objects:
                     if obj.animation_data and obj.animation_data.nla_tracks:
                         for track in obj.animation_data.nla_tracks:
@@ -1086,7 +1086,7 @@ class LSD_PG_Animation_Settings(bpy.types.PropertyGroup):
                                 is_layer_track = any(track.name in {l.track_name, l.name} for l in obj.lsd_anim_layers_data.layers if l.name != "Base Layer")
                             is_base_track = ("Base_Layer" in track.name or "Base Layer" in track.name)
                             if is_layer_track:
-                                track.mute = True
+                                track.mute = any(l.is_muted for l in obj.lsd_anim_layers_data.layers if track.name in {l.track_name, l.name})
                                 track.lock = False
                             elif is_base_track:
                                 track.mute = False
@@ -1101,14 +1101,14 @@ class LSD_PG_Animation_Settings(bpy.types.PropertyGroup):
                         if base_action:
                             try:
                                 if obj.animation_data.action != base_action:
-                                    obj.animation_data.action = base_action
+                                    obj.animation_data.action = None if (hasattr(obj, 'lsd_anim_layers_data') and obj.lsd_anim_layers_data.layers) else base_action
                             except Exception: pass
                         elif obj.animation_data.nla_tracks and len(obj.animation_data.nla_tracks) > 0:
                             bottom_track = obj.animation_data.nla_tracks[0]
                             if len(bottom_track.strips) > 0:
                                 try:
                                     if obj.animation_data.action != bottom_track.strips[0].action:
-                                        obj.animation_data.action = bottom_track.strips[0].action
+                                        obj.animation_data.action = None if (hasattr(obj, 'lsd_anim_layers_data') and obj.lsd_anim_layers_data.layers) else bottom_track.strips[0].action
                                 except Exception: pass
                         
                         obj.update_tag(refresh={'OBJECT', 'DATA'})
@@ -1139,10 +1139,13 @@ class LSD_PG_Animation_Settings(bpy.types.PropertyGroup):
         except Exception as e:
             print(f"[LSD] Onion Skin toggle error: {e}")
 
+    show_subpanel_layers: bpy.props.BoolProperty(name="Show Animation Layers", default=True, description="Expand or collapse the animation layers sub-panel")
+    show_subpanel_library: bpy.props.BoolProperty(name="Show Animation Library", default=True, description="Expand or collapse the animation layer library sub-panel")
+    show_subpanel_onion_skin: bpy.props.BoolProperty(name="Show Timeline Onion Skinning", default=False, description="Expand or collapse the timeline onion skinning sub-panel")
     layers_enabled: bpy.props.BoolProperty(name="Enable Animation Layers", default=False, update=update_layers_enabled)
     
     # --- Animation Library ---
-    library_enabled: bpy.props.BoolProperty(default=True, description="Expand or collapse the animation layer library panel")
+    library_enabled: bpy.props.BoolProperty(name="Enable Animation Library", default=True, description="Enable or disable the animation layer library")
     library_items: bpy.props.CollectionProperty(type=LSD_PG_AnimLibraryItem)
     active_library_index: bpy.props.IntProperty(name="Active Library Item", default=0)
     
@@ -1900,9 +1903,11 @@ def register():
     def update_anim_panel_visibility(self, context):
         is_shown = getattr(self, "lsd_show_panel_animation", False)
         is_enabled = getattr(self, "lsd_panel_enabled_animation", True)
-        if not is_shown or not is_enabled:
+        if not is_enabled:
             settings = getattr(self, "lsd_anim_settings", None)
             if settings:
+                try: settings.update_layers_enabled(context)
+                except Exception: pass
                 if getattr(settings, "layers_enabled", False):
                     settings.layers_enabled = False
                 if getattr(settings, "onion_skin_enabled", False):
