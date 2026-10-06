@@ -47,17 +47,10 @@ from .. import properties
 from .. import operators
 
 from .ui_dimensions import LSD_PT_Dimensions_And_Precision_Transforms
-from .ui_physics import LSD_PT_Physics
-
-from .ui_transmission import LSD_PT_Transmission
-from .ui_kinematics import LSD_PT_Kinematics_Setup
-
-from .ui_export import LSD_PT_Import_Export_System
-
-from .ui_preferences import LSD_PT_Preferences
-from .ui_camera import LSD_PT_Camera_Cinematography
 from .ui_sdf_booleans import LSD_PT_SDF_Booleans
 from .ui_animation import LSD_PT_Animation_System_Main
+from .ui_camera import LSD_PT_Camera_Cinematography
+from .ui_preferences import LSD_PT_Preferences
 
 class LSD_PT_FabricationConstructionDraftsmanTools(bpy.types.Panel):
     """
@@ -75,12 +68,8 @@ class LSD_PT_FabricationConstructionDraftsmanTools(bpy.types.Panel):
         panel_map = [
             (LSD_PT_Dimensions_And_Precision_Transforms, "lsd_order_dimensions"),
             (LSD_PT_SDF_Booleans, "lsd_order_sdf_booleans"),
-            (LSD_PT_Kinematics_Setup, "lsd_order_kinematics"),
             (LSD_PT_Animation_System_Main, "lsd_order_animation"),
             (LSD_PT_Camera_Cinematography, "lsd_order_camera"),
-            (LSD_PT_Physics, "lsd_order_physics"),
-            (LSD_PT_Transmission, "lsd_order_transmission"),
-            (LSD_PT_Import_Export_System, "lsd_order_export"),
             (LSD_PT_Preferences, "lsd_order_preferences"),
         ]
         # Sort panels based on user-defined order

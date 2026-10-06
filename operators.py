@@ -7034,8 +7034,11 @@ class LSD_OT_Sync_Active_Layer(bpy.types.Operator):
                     if self._target_region:
                         try:
                             obj = anim_core.get_active_object(context)
-                            settings = context.scene.lsd_anim_settings
-                            active_layer = settings.layers[settings.active_layer_index] if settings.layers and settings.active_layer_index < len(settings.layers) else None
+                            active_layer = None
+                            if obj and hasattr(obj, 'lsd_anim_layers_data'):
+                                ldata = obj.lsd_anim_layers_data
+                                if 0 <= ldata.active_layer_index < len(ldata.layers):
+                                    active_layer = ldata.layers[ldata.active_layer_index]
                             
                             if active_layer and (active_layer.is_locked or active_layer.is_muted):
                                 self.finish(context)
@@ -7102,21 +7105,30 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
             
         kf_options = set()
         
+        # Group targets by animation holder (Armature for pose bones, object for objects)
+        targets_by_holder = {}
         for target in targets:
             anim_holder = obj if (context.mode == 'POSE' and obj.type == 'ARMATURE') else target
+            if anim_holder not in targets_by_holder:
+                targets_by_holder[anim_holder] = []
+            targets_by_holder[anim_holder].append(target)
             
+        for anim_holder, holder_targets in targets_by_holder.items():
             # Ensure animation data
             if not anim_holder.animation_data:
                 anim_holder.animation_data_create()
                 
             # Locate active layer and strip
             track_strip = None
-            if hasattr(anim_holder, 'lsd_anim_layers_data') and anim_holder.lsd_anim_layers_data.layers:
-                ldata = anim_holder.lsd_anim_layers_data
+            active_layer = None
+            active_layer_idx = -1
+            ldata = getattr(anim_holder, 'lsd_anim_layers_data', None)
+            if ldata and ldata.layers:
                 if 0 <= ldata.active_layer_index < len(ldata.layers):
-                    al = ldata.layers[ldata.active_layer_index]
+                    active_layer_idx = ldata.active_layer_index
+                    active_layer = ldata.layers[active_layer_idx]
                     for tr in anim_holder.animation_data.nla_tracks:
-                        if (tr.name == al.name or tr.name == al.track_name) and tr.strips:
+                        if (tr.name == active_layer.name or tr.name == active_layer.track_name) and tr.strips:
                             track_strip = tr.strips[0]
                             break
                             
@@ -7147,46 +7159,234 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
             exact_float = float(frame)
             if track_strip:
                 exact_float = track_strip.action_frame_start + (frame - track_strip.frame_start) / track_strip.scale
-                                
-            # Use Python API keyframing to reliably insert keyframes
-            try:
-                if context.mode == 'POSE' and obj.type == 'ARMATURE':
-                    bone_path = f'pose.bones["{target.name}"]'
-                    obj.keyframe_insert(data_path=f'{bone_path}.location', frame=exact_float, options=kf_options)
-                    if getattr(target, "rotation_mode", "QUATERNION") == 'QUATERNION':
-                        obj.keyframe_insert(data_path=f'{bone_path}.rotation_quaternion', frame=exact_float, options=kf_options)
-                    elif target.rotation_mode == 'AXIS_ANGLE':
-                        obj.keyframe_insert(data_path=f'{bone_path}.rotation_axis_angle', frame=exact_float, options=kf_options)
+
+            is_combine_layer = (
+                active_layer is not None and 
+                active_layer.blend_type == 'COMBINE' and 
+                active_layer_idx > 0 and 
+                "Base" not in active_layer.name
+            )
+
+            if is_combine_layer:
+                # --- TRUE DELTA CALCULATION ENGINE ---
+                # 1. Capture desired visual transforms from current viewport pose
+                desired_transforms = {}
+                for target in holder_targets:
+                    rot_mode = getattr(target, "rotation_mode", "QUATERNION")
+                    desired_transforms[target] = {
+                        "location": target.location.copy(),
+                        "rotation_mode": rot_mode,
+                        "rotation_quaternion": target.rotation_quaternion.copy() if rot_mode == 'QUATERNION' else None,
+                        "rotation_axis_angle": list(target.rotation_axis_angle) if rot_mode == 'AXIS_ANGLE' else None,
+                        "rotation_euler": target.rotation_euler.copy() if rot_mode not in {'QUATERNION', 'AXIS_ANGLE'} else None,
+                        "scale": target.scale.copy(),
+                    }
+
+                # 2. Temporarily mute active and higher tracks and clear floating action to sample base evaluation
+                orig_track_mutes = {}
+                for idx in range(active_layer_idx, len(ldata.layers)):
+                    lyr = ldata.layers[idx]
+                    for tr in anim_holder.animation_data.nla_tracks:
+                        if tr.name == lyr.name or tr.name == lyr.track_name:
+                            orig_track_mutes[tr] = tr.mute
+                            tr.mute = True
+
+                orig_holder_action = anim_holder.animation_data.action
+                try: anim_holder.animation_data.action = None
+                except Exception: pass
+                context.view_layer.update()
+
+                # 3. Read base transforms evaluated from lower stack
+                base_transforms = {}
+                for target in holder_targets:
+                    rot_mode = desired_transforms[target]["rotation_mode"]
+                    base_transforms[target] = {
+                        "location": target.location.copy(),
+                        "rotation_quaternion": target.rotation_quaternion.copy() if rot_mode == 'QUATERNION' else None,
+                        "rotation_axis_angle": list(target.rotation_axis_angle) if rot_mode == 'AXIS_ANGLE' else None,
+                        "rotation_euler": target.rotation_euler.copy() if rot_mode not in {'QUATERNION', 'AXIS_ANGLE'} else None,
+                        "scale": target.scale.copy(),
+                    }
+
+                # 4. Restore track mutes and active action
+                for tr, m in orig_track_mutes.items():
+                    tr.mute = m
+                try:
+                    if orig_holder_action:
+                        anim_holder.animation_data.action = orig_holder_action
+                except Exception: pass
+
+                # 5. Compute true deltas, anchor frame 1.0 at identity if needed, and insert keyframes
+                for target in holder_targets:
+                    rot_mode = desired_transforms[target]["rotation_mode"]
+                    des = desired_transforms[target]
+                    base = base_transforms[target]
+
+                    # Translation delta
+                    d_loc = des["location"] - base["location"]
+
+                    # Rotation delta
+                    d_quat = None
+                    d_euler = None
+                    d_axis_angle = None
+                    if rot_mode == 'QUATERNION':
+                        base_q = base["rotation_quaternion"].normalized()
+                        des_q = des["rotation_quaternion"].normalized()
+                        d_quat = base_q.inverted() @ des_q
+                        if d_quat.w < 0:
+                            d_quat = -d_quat
+                    elif rot_mode == 'AXIS_ANGLE':
+                        b_aa = base["rotation_axis_angle"]
+                        d_aa = des["rotation_axis_angle"]
+                        b_q = mathutils.Quaternion(mathutils.Vector((b_aa[1], b_aa[2], b_aa[3])), b_aa[0])
+                        d_q = mathutils.Quaternion(mathutils.Vector((d_aa[1], d_aa[2], d_aa[3])), d_aa[0])
+                        delta_q = b_q.inverted() @ d_q
+                        if delta_q.w < 0: delta_q = -delta_q
+                        axis, angle = delta_q.to_axis_angle()
+                        d_axis_angle = [angle, axis.x, axis.y, axis.z]
                     else:
-                        obj.keyframe_insert(data_path=f'{bone_path}.rotation_euler', frame=exact_float, options=kf_options)
-                    obj.keyframe_insert(data_path=f'{bone_path}.scale', frame=exact_float, options=kf_options)
-                    
-                    # Keyframe custom properties on the bone
-                    for prop in target.keys():
-                        if prop not in '_RNA_UI':
-                            try: obj.keyframe_insert(data_path=f'{bone_path}["{prop}"]', frame=exact_float, options=kf_options)
-                            except: pass
-                else:
-                    # For standard objects
-                    target.keyframe_insert(data_path="location", frame=exact_float, options=kf_options)
-                    if getattr(target, "rotation_mode", "QUATERNION") == 'QUATERNION':
-                        target.keyframe_insert(data_path="rotation_quaternion", frame=exact_float, options=kf_options)
-                    elif target.rotation_mode == 'AXIS_ANGLE':
-                        target.keyframe_insert(data_path="rotation_axis_angle", frame=exact_float, options=kf_options)
-                    else:
-                        target.keyframe_insert(data_path="rotation_euler", frame=exact_float, options=kf_options)
-                    target.keyframe_insert(data_path="scale", frame=exact_float, options=kf_options)
-                    
-                    # Keyframe custom properties on the object
-                    for prop in target.keys():
-                        if prop not in '_RNA_UI':
-                            try: target.keyframe_insert(data_path=f'["{prop}"]', frame=exact_float, options=kf_options)
-                            except: pass
-            except Exception as e:
-                self.report({'WARNING'}, f"Failed to natively keyframe {target.name}: {e}")
-                    
+                        des_e = des["rotation_euler"]
+                        base_e = base["rotation_euler"]
+                        d_euler = mathutils.Euler((des_e.x - base_e.x, des_e.y - base_e.y, des_e.z - base_e.z), des_e.order)
+
+                    # Scale delta
+                    des_s = des["scale"]
+                    base_s = base["scale"]
+                    d_scale = mathutils.Vector((
+                        des_s.x / base_s.x if abs(base_s.x) > 1e-6 else 1.0,
+                        des_s.y / base_s.y if abs(base_s.y) > 1e-6 else 1.0,
+                        des_s.z / base_s.z if abs(base_s.z) > 1e-6 else 1.0,
+                    ))
+
+                    bone_path = f'pose.bones["{target.name}"]' if (context.mode == 'POSE' and obj.type == 'ARMATURE') else ""
+                    prefix_path = f'{bone_path}.' if bone_path else ""
+
+                    # Anti-backtracking anchor: If exact_float > 1.0 and no earlier key exists, anchor frame 1.0 to identity zero-delta
+                    if exact_float > 1.0:
+                        has_early_key = False
+                        action_fcurves = anim_core.get_action_fcurves(anim_holder, action)
+                        for fc in action_fcurves:
+                            if (not prefix_path or fc.data_path.startswith(prefix_path)):
+                                for kp in fc.keyframe_points:
+                                    if kp.co.x <= 1.0 + 1e-4:
+                                        has_early_key = True
+                                        break
+                                if has_early_key:
+                                    break
+                        if not has_early_key:
+                            target.location = mathutils.Vector((0.0, 0.0, 0.0))
+                            if rot_mode == 'QUATERNION':
+                                target.rotation_quaternion = mathutils.Quaternion((1.0, 0.0, 0.0, 0.0))
+                            elif rot_mode == 'AXIS_ANGLE':
+                                target.rotation_axis_angle = [0.0, 0.0, 1.0, 0.0]
+                            else:
+                                target.rotation_euler = mathutils.Euler((0.0, 0.0, 0.0), rot_mode)
+                            target.scale = mathutils.Vector((1.0, 1.0, 1.0))
+
+                            try:
+                                if bone_path:
+                                    obj.keyframe_insert(data_path=f'{bone_path}.location', frame=1.0, options=kf_options)
+                                    if rot_mode == 'QUATERNION': obj.keyframe_insert(data_path=f'{bone_path}.rotation_quaternion', frame=1.0, options=kf_options)
+                                    elif rot_mode == 'AXIS_ANGLE': obj.keyframe_insert(data_path=f'{bone_path}.rotation_axis_angle', frame=1.0, options=kf_options)
+                                    else: obj.keyframe_insert(data_path=f'{bone_path}.rotation_euler', frame=1.0, options=kf_options)
+                                    obj.keyframe_insert(data_path=f'{bone_path}.scale', frame=1.0, options=kf_options)
+                                else:
+                                    target.keyframe_insert(data_path="location", frame=1.0, options=kf_options)
+                                    if rot_mode == 'QUATERNION': target.keyframe_insert(data_path="rotation_quaternion", frame=1.0, options=kf_options)
+                                    elif rot_mode == 'AXIS_ANGLE': target.keyframe_insert(data_path="rotation_axis_angle", frame=1.0, options=kf_options)
+                                    else: target.keyframe_insert(data_path="rotation_euler", frame=1.0, options=kf_options)
+                                    target.keyframe_insert(data_path="scale", frame=1.0, options=kf_options)
+                            except Exception: pass
+
+                    # Insert True Delta transforms at exact_float
+                    target.location = d_loc
+                    if rot_mode == 'QUATERNION': target.rotation_quaternion = d_quat
+                    elif rot_mode == 'AXIS_ANGLE': target.rotation_axis_angle = d_axis_angle
+                    else: target.rotation_euler = d_euler
+                    target.scale = d_scale
+
+                    try:
+                        if bone_path:
+                            obj.keyframe_insert(data_path=f'{bone_path}.location', frame=exact_float, options=kf_options)
+                            if rot_mode == 'QUATERNION': obj.keyframe_insert(data_path=f'{bone_path}.rotation_quaternion', frame=exact_float, options=kf_options)
+                            elif rot_mode == 'AXIS_ANGLE': obj.keyframe_insert(data_path=f'{bone_path}.rotation_axis_angle', frame=exact_float, options=kf_options)
+                            else: obj.keyframe_insert(data_path=f'{bone_path}.rotation_euler', frame=exact_float, options=kf_options)
+                            obj.keyframe_insert(data_path=f'{bone_path}.scale', frame=exact_float, options=kf_options)
+                            for prop in target.keys():
+                                if prop not in '_RNA_UI':
+                                    try: obj.keyframe_insert(data_path=f'{bone_path}["{prop}"]', frame=exact_float, options=kf_options)
+                                    except: pass
+                        else:
+                            target.keyframe_insert(data_path="location", frame=exact_float, options=kf_options)
+                            if rot_mode == 'QUATERNION': target.keyframe_insert(data_path="rotation_quaternion", frame=exact_float, options=kf_options)
+                            elif rot_mode == 'AXIS_ANGLE': target.keyframe_insert(data_path="rotation_axis_angle", frame=exact_float, options=kf_options)
+                            else: target.keyframe_insert(data_path="rotation_euler", frame=exact_float, options=kf_options)
+                            target.keyframe_insert(data_path="scale", frame=exact_float, options=kf_options)
+                            for prop in target.keys():
+                                if prop not in '_RNA_UI':
+                                    try: target.keyframe_insert(data_path=f'["{prop}"]', frame=exact_float, options=kf_options)
+                                    except: pass
+                    except Exception as e:
+                        self.report({'WARNING'}, f"Failed to keyframe delta for {target.name}: {e}")
+
+                    # Restore target viewport transform
+                    target.location = des["location"]
+                    if rot_mode == 'QUATERNION': target.rotation_quaternion = des["rotation_quaternion"]
+                    elif rot_mode == 'AXIS_ANGLE': target.rotation_axis_angle = des["rotation_axis_angle"]
+                    else: target.rotation_euler = des["rotation_euler"]
+                    target.scale = des["scale"]
+
+                    # Clamp handles and set CONSTANT extrapolation to eliminate dips and drift
+                    for fc in anim_core.get_action_fcurves(anim_holder, action):
+                        if not prefix_path or fc.data_path.startswith(prefix_path):
+                            fc.extrapolation = 'CONSTANT'
+                            for kp in fc.keyframe_points:
+                                kp.handle_left_type = 'AUTO_CLAMPED'
+                                kp.handle_right_type = 'AUTO_CLAMPED'
+
+            else:
+                # Standard Direct Keyframing for Base Layer or REPLACE mode layers
+                for target in holder_targets:
+                    bone_path = f'pose.bones["{target.name}"]' if (context.mode == 'POSE' and obj.type == 'ARMATURE') else ""
+                    prefix_path = f'{bone_path}.' if bone_path else ""
+                    try:
+                        if bone_path:
+                            obj.keyframe_insert(data_path=f'{bone_path}.location', frame=exact_float, options=kf_options)
+                            if getattr(target, "rotation_mode", "QUATERNION") == 'QUATERNION':
+                                obj.keyframe_insert(data_path=f'{bone_path}.rotation_quaternion', frame=exact_float, options=kf_options)
+                            elif target.rotation_mode == 'AXIS_ANGLE':
+                                obj.keyframe_insert(data_path=f'{bone_path}.rotation_axis_angle', frame=exact_float, options=kf_options)
+                            else:
+                                obj.keyframe_insert(data_path=f'{bone_path}.rotation_euler', frame=exact_float, options=kf_options)
+                            obj.keyframe_insert(data_path=f'{bone_path}.scale', frame=exact_float, options=kf_options)
+                            for prop in target.keys():
+                                if prop not in '_RNA_UI':
+                                    try: obj.keyframe_insert(data_path=f'{bone_path}["{prop}"]', frame=exact_float, options=kf_options)
+                                    except: pass
+                        else:
+                            target.keyframe_insert(data_path="location", frame=exact_float, options=kf_options)
+                            if getattr(target, "rotation_mode", "QUATERNION") == 'QUATERNION':
+                                target.keyframe_insert(data_path="rotation_quaternion", frame=exact_float, options=kf_options)
+                            elif target.rotation_mode == 'AXIS_ANGLE':
+                                target.keyframe_insert(data_path="rotation_axis_angle", frame=exact_float, options=kf_options)
+                            else:
+                                target.keyframe_insert(data_path="rotation_euler", frame=exact_float, options=kf_options)
+                            target.keyframe_insert(data_path="scale", frame=exact_float, options=kf_options)
+                            for prop in target.keys():
+                                if prop not in '_RNA_UI':
+                                    try: target.keyframe_insert(data_path=f'["{prop}"]', frame=exact_float, options=kf_options)
+                                    except: pass
+                    except Exception as e:
+                        self.report({'WARNING'}, f"Failed to natively keyframe {target.name}: {e}")
+
+                    for fc in anim_core.get_action_fcurves(anim_holder, action):
+                        if not prefix_path or fc.data_path.startswith(prefix_path):
+                            fc.extrapolation = 'CONSTANT'
+                            for kp in fc.keyframe_points:
+                                kp.handle_left_type = 'AUTO_CLAMPED'
+                                kp.handle_right_type = 'AUTO_CLAMPED'
+
             if track_strip is not None:
-                # Ensure strip bounds encompass the newly inserted keyframe without distorting scale
                 if hasattr(track_strip, 'use_sync_length'):
                     track_strip.use_sync_length = False
                 if exact_float > track_strip.action_frame_end:
@@ -7195,8 +7395,19 @@ class LSD_OT_Anim_Keyframe_Entire_Pose(bpy.types.Operator):
                     track_strip.action_frame_start = exact_float
                 track_strip.scale = 1.0
                 track_strip.frame_end = track_strip.frame_start + (track_strip.action_frame_end - track_strip.action_frame_start)
-                context.view_layer.update()
-                    
+                track_strip.extrapolation = 'HOLD' if is_combine_layer and track_strip.frame_start <= 1.0 else ('HOLD_FORWARD' if is_combine_layer else 'HOLD')
+
+            # Anti-inversion check: If active layer is not topmost and Tweak Mode is not active,
+            # clear animation_data.action so NLA stack does not invert
+            is_topmost = (active_layer_idx >= len(ldata.layers) - 1) if (ldata and active_layer_idx >= 0) else True
+            if not is_topmost and not getattr(anim_holder.animation_data, 'use_tweak_mode', False):
+                try: anim_holder.animation_data.action = None
+                except Exception: pass
+                if track_strip and active_layer:
+                    for tr in anim_holder.animation_data.nla_tracks:
+                        if tr.name == active_layer.name or tr.name == active_layer.track_name:
+                            tr.mute = active_layer.is_muted
+
         context.view_layer.update()
         anim_core.ensure_timeline_frame_display(context)
         try:
@@ -8275,24 +8486,37 @@ class LSD_OT_SnapToKeyframe(bpy.types.Operator):
         curr_frame = context.scene.frame_current
         keyframes = set()
             
-        if not keyframes and obj.animation_data and obj.animation_data.action:
-            # Map NLA target frame offset (from Scene to Action)
+        if not keyframes and obj.animation_data:
+            target_action = obj.animation_data.action
             strip_frame_start = 0
             strip_action_frame_start = 0
             strip_scale = 1.0
-            
-            if getattr(obj.animation_data, 'use_tweak_mode', False):
+
+            if not target_action and hasattr(obj, 'lsd_anim_layers_data'):
+                ldata = obj.lsd_anim_layers_data
+                if 0 <= ldata.active_layer_index < len(ldata.layers):
+                    al = ldata.layers[ldata.active_layer_index]
+                    for tr in obj.animation_data.nla_tracks:
+                        if (tr.name == al.name or tr.name == al.track_name) and tr.strips:
+                            st = tr.strips[0]
+                            target_action = st.action
+                            strip_frame_start = st.frame_start
+                            strip_action_frame_start = st.action_frame_start
+                            strip_scale = st.scale
+                            break
+
+            if getattr(obj.animation_data, 'use_tweak_mode', False) and target_action:
                 for track in obj.animation_data.nla_tracks:
                     for strip in track.strips:
-                        if strip.action == obj.animation_data.action:
+                        if strip.action == target_action:
                             strip_frame_start = strip.frame_start
                             strip_action_frame_start = strip.action_frame_start
                             strip_scale = strip.scale
                             break
                             
-            # Fallback robust extraction
-            import layouts_systems_draftsman_toolkit.anim_core as anim_core
-            fcurves_list = anim_core.get_action_fcurves(obj, obj.animation_data.action)
+            if target_action:
+                import layouts_systems_draftsman_toolkit.anim_core as anim_core
+                fcurves_list = anim_core.get_action_fcurves(obj, target_action)
             
             for fcurve in fcurves_list:
                 length = len(fcurve.keyframe_points)

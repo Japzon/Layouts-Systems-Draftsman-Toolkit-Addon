@@ -1887,16 +1887,11 @@ def register():
     
     # 3. Order Properties
     prop_names = [
-        "lsd_order_sdf_booleans",
         "lsd_order_dimensions",
-        "lsd_order_materials",
+        "lsd_order_sdf_booleans",
         "lsd_order_animation",
-        "lsd_order_kinematics",
-        "lsd_order_physics",
-        "lsd_order_transmission",
         "lsd_order_camera",
-        "lsd_order_export",
-        "lsd_order_preferences"
+        "lsd_order_preferences",
     ]
     for i, name in enumerate(prop_names):
         setattr(bpy.types.Scene, name, bpy.props.IntProperty(name="Panel Order", default=i))
@@ -2003,10 +1998,11 @@ def unregister():
         ]
         # Add order props
         prop_names = [
-            "lsd_order_dimensions", "lsd_order_sdf_booleans",
-            "lsd_order_materials", "lsd_order_physics", "lsd_order_kinematics",
-            "lsd_order_transmission", "lsd_order_camera", "lsd_order_export",
-            "lsd_order_preferences"
+            "lsd_order_dimensions",
+            "lsd_order_sdf_booleans",
+            "lsd_order_animation",
+            "lsd_order_camera",
+            "lsd_order_preferences",
         ]
         all_scene_props += prop_names
         for prop in all_scene_props:

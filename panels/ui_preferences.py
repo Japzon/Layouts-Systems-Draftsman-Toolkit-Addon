@@ -97,26 +97,17 @@ class LSD_PT_Preferences:
             # --- Panel Order & Visibility Data ---
             top_level_names = {
                 "lsd_order_dimensions": "Dimensions & Precision Transforms",
-                "lsd_order_sdf_booleans": "SDF Booleans",
-                "lsd_order_materials": "Paint Tools",
-                "lsd_order_physics": "Physics",
+                "lsd_order_sdf_booleans": "Booleans",
                 "lsd_order_animation": "Animation Layers System",
-                "lsd_order_kinematics": "Kinematics Setup",
-                "lsd_order_transmission": "Transmission",
                 "lsd_order_camera": "Camera Studio & Pathing",
-                "lsd_order_export": "Import/Export System",
                 "lsd_order_preferences": "Preferences",
             }
             visibility_mapping = {
                 "lsd_order_dimensions": "lsd_panel_enabled_dimensions",
                 "lsd_order_sdf_booleans": "lsd_panel_enabled_sdf_booleans",
-                "lsd_order_materials": "lsd_panel_enabled_materials",
-                "lsd_order_physics": "lsd_panel_enabled_physics",
                 "lsd_order_animation": "lsd_panel_enabled_animation",
-                "lsd_order_kinematics": "lsd_panel_enabled_kinematics",
-                "lsd_order_transmission": "lsd_panel_enabled_transmission",
                 "lsd_order_camera": "lsd_panel_enabled_camera",
-                "lsd_order_export": "lsd_panel_enabled_export",
+                "lsd_order_preferences": "lsd_panel_enabled_preferences",
             }
             
             # Sort order keys based on current property values

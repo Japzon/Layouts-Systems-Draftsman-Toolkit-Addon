@@ -274,6 +274,40 @@ def ensure_strip_bounds_and_scale(strip, scene_frame_end, is_base=False):
         eff_act_end = max(act_end, eff_act_start + 1.0)
         act_duration = eff_act_end - eff_act_start
         
+        # Anti-backtracking safeguard for COMBINE strips:
+        # If the strip starts at or before frame 1.0, but authored keyframes start after frame 1.0,
+        # anchor frame 1.0 at identity (zero delta) so F-curve pre-roll doesn't hold non-zero deltas backward.
+        if strip.blend_type == 'COMBINE' and not is_base and strip.frame_start <= 1.0 and act_start > 1.0:
+            try:
+                fc_list = []
+                if hasattr(act, 'fcurves') and act.fcurves:
+                    fc_list.extend(act.fcurves)
+                if hasattr(act, 'layers'):
+                    for lyr in act.layers:
+                        for cb in getattr(lyr, 'channelbags', []):
+                            if hasattr(cb, 'fcurves') and cb.fcurves:
+                                fc_list.extend(cb.fcurves)
+                for fc in fc_list:
+                    if fc.keyframe_points and min(kp.co.x for kp in fc.keyframe_points) > 1.0:
+                        val = 0.0
+                        if "scale" in fc.data_path:
+                            val = 1.0
+                        elif "rotation_quaternion" in fc.data_path and fc.array_index == 0:
+                            val = 1.0
+                        kp = fc.keyframe_points.insert(frame=1.0, value=val)
+                        kp.handle_left_type = 'AUTO_CLAMPED'
+                        kp.handle_right_type = 'AUTO_CLAMPED'
+                        fc.extrapolation = 'CONSTANT'
+                        fc.update()
+                if hasattr(act, 'frame_range'):
+                    act_start = float(act.frame_range[0])
+                    act_end = float(act.frame_range[1])
+                    eff_act_start = min(1.0, act_start) if strip.frame_start <= 1.0 else act_start
+                    eff_act_end = max(act_end, eff_act_start + 1.0)
+                    act_duration = eff_act_end - eff_act_start
+            except Exception:
+                pass
+
         try:
             strip.action_frame_start = eff_act_start
             strip.action_frame_end = eff_act_end
@@ -358,8 +392,9 @@ def sync_layer_light(context):
             if active_track:
                 active_track.mute = active_layer.is_muted
         else:
+            is_topmost = (layer_data.active_layer_index >= len(layer_data.layers) - 1)
             if active_strip and not active_layer.is_muted:
-                if active_strip.frame_start <= 1.0:
+                if active_strip.frame_start <= 1.0 and is_topmost:
                     try:
                         if obj.animation_data.action != active_strip.action:
                             obj.animation_data.action = active_strip.action
@@ -373,7 +408,7 @@ def sync_layer_light(context):
                     except Exception: pass
                 else:
                     if active_track:
-                        active_track.mute = False
+                        active_track.mute = active_layer.is_muted
                     bind_strip_slot(obj, active_strip)
                     try:
                         obj.animation_data.action = None
@@ -578,10 +613,11 @@ def execute_sync_logic(context, enter_tweak_mode=True):
                         bind_strip_slot(obj, active_strip)
                     else:
                         # Dual-mode support: If Tweak Mode is not active (e.g. no NLA Editor open in layout),
-                        # directly assign the active layer's action to obj.animation_data.action if frame_start <= 1.0
-                        # so native keyframing (I / auto-key) writes to this layer.
-                        # For strips with frame_start > 1.0, they MUST evaluate through NLA track so timeline offsets are respected!
-                        if active_strip.frame_start <= 1.0:
+                        # directly assign the active layer's action to obj.animation_data.action if frame_start <= 1.0 AND is_topmost
+                        # so native keyframing (I / auto-key) writes to this layer without inverting the NLA stack.
+                        # For lower layers or strips with frame_start > 1.0, they MUST evaluate through NLA track in natural order!
+                        is_topmost = (layer_data.active_layer_index >= len(layer_data.layers) - 1)
+                        if active_strip.frame_start <= 1.0 and is_topmost:
                             obj.animation_data.action = active_strip.action
                             bind_strip_slot(obj, active_strip)
                             active_track.mute = True
@@ -590,7 +626,7 @@ def execute_sync_logic(context, enter_tweak_mode=True):
                                 obj.animation_data.action_extrapolation = 'HOLD'
                             except Exception: pass
                         else:
-                            active_track.mute = False
+                            active_track.mute = active_layer.is_muted
                             bind_strip_slot(obj, active_strip)
                             try:
                                 obj.animation_data.action = None

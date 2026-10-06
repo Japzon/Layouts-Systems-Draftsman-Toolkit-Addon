@@ -10,29 +10,19 @@
 
 from . import ui_common
 from . import ui_dimensions
-from . import ui_physics
-from . import ui_transmission
-from . import ui_kinematics
-from . import ui_export
+from . import ui_sdf_booleans
+from . import ui_animation
+from . import ui_camera
 from . import ui_preferences
 from . import ui_main
-from . import ui_camera
-from . import ui_sdf_booleans
-from . import ui_workflow_optimizer
-from . import ui_animation
 
 modules = [
     ui_common,
     ui_dimensions,
-    ui_physics,
-    ui_transmission,
-    ui_animation,
-    ui_kinematics,
-    ui_export,
-    ui_preferences,
-    ui_camera,
     ui_sdf_booleans,
-    ui_workflow_optimizer,
+    ui_animation,
+    ui_camera,
+    ui_preferences,
     ui_main,
 ]
 

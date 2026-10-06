@@ -65,22 +65,10 @@ DEFAULT_IK_CHAIN_LENGTH: int = 255
 # --- UI Panel Management (LSD Scoped) ---
 
 LSD_PANEL_PROPS: List[str] = [
-    "lsd_panel_enabled_parts", "lsd_show_panel_parts",
-    "lsd_panel_enabled_electronics", "lsd_show_panel_electronics",
-    "lsd_panel_enabled_materials", "lsd_show_panel_materials",
-    "lsd_panel_enabled_lighting", "lsd_show_panel_lighting",
     "lsd_panel_enabled_dimensions", "lsd_show_panel_dimensions",
-    "lsd_panel_enabled_ai_factory", "lsd_show_panel_ai_factory",
-    "lsd_panel_enabled_kinematics", "lsd_show_panel_kinematics",
-    "lsd_panel_enabled_physics", "lsd_show_panel_physics",
-    "lsd_panel_enabled_transmission", "lsd_show_panel_transmission",
-    "lsd_panel_enabled_export", "lsd_show_panel_export",
-    "lsd_panel_enabled_camera", "lsd_show_panel_camera",
-    "lsd_panel_enabled_architectural", "lsd_show_panel_architectural",
-    "lsd_panel_enabled_vehicle", "lsd_show_panel_vehicle",
     "lsd_panel_enabled_sdf_booleans", "lsd_show_panel_sdf_booleans",
-    "lsd_panel_enabled_presets", "lsd_show_panel_presets",
     "lsd_panel_enabled_animation", "lsd_show_panel_animation",
+    "lsd_panel_enabled_camera", "lsd_show_panel_camera",
     "lsd_panel_enabled_preferences", "lsd_show_panel_preferences",
 ]
 
